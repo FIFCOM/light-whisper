@@ -160,7 +160,12 @@ export function useExclusivePicker<T extends string>() {
     const observer = new MutationObserver(updateOptions);
     observer.observe(listbox, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-active", "disabled"] });
 
+    let openingFocusFrame: number | undefined;
     const focusOption = (index: number) => {
+      if (openingFocusFrame !== undefined) {
+        window.cancelAnimationFrame(openingFocusFrame);
+        openingFocusFrame = undefined;
+      }
       if (!options.length) return;
       const normalized = (index + options.length) % options.length;
       options.forEach((option, optionIndex) => {
@@ -177,7 +182,6 @@ export function useExclusivePicker<T extends string>() {
 
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.target instanceof Element && event.target.closest("select")) return;
-      const currentIndex = options.findIndex((option) => option === document.activeElement);
       if (event.key === "Escape") {
         event.preventDefault();
         close();
@@ -186,6 +190,8 @@ export function useExclusivePicker<T extends string>() {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
         return;
       }
+      updateOptions();
+      const currentIndex = options.findIndex((option) => option === document.activeElement);
       if (event.key === "ArrowDown") {
         event.preventDefault();
         focusOption(currentIndex < 0 ? 0 : currentIndex + 1);
@@ -230,9 +236,9 @@ export function useExclusivePicker<T extends string>() {
     };
 
     container.addEventListener("keydown", onKeyDown);
-    let openingFocusFrame: number | undefined;
     if (!container.querySelector("input, textarea")) {
       openingFocusFrame = window.requestAnimationFrame(() => {
+        openingFocusFrame = undefined;
         const selectedIndex = options.findIndex((option) => option.dataset.active === "true");
         focusOption(selectedIndex >= 0 ? selectedIndex : 0);
       });

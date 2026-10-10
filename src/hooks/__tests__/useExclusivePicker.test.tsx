@@ -110,18 +110,38 @@ describe("useExclusivePicker accessibility", () => {
 
   it("updates option semantics and keyboard navigation when async results arrive", async () => {
     const user = userEvent.setup();
-    const { rerender } = render(<PickerHarness empty />);
-    const trigger = screen.getByRole("button", { name: "Engine" });
-    await user.click(trigger);
-    rerender(<PickerHarness />);
-    const options = await screen.findAllByRole("option");
-    trigger.focus();
-    await user.keyboard("{End}");
-    expect(options[2]).toHaveFocus();
-    rerender(<PickerHarness empty />);
-    trigger.focus();
-    await user.keyboard("{Escape}");
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    const { rerender, unmount } = render(<PickerHarness empty />);
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
+      frames.delete(id);
+    });
+    try {
+      const trigger = screen.getByRole("button", { name: "Engine" });
+      await user.click(trigger);
+      expect(frames.size).toBe(1);
+      rerender(<PickerHarness />);
+      const options = await screen.findAllByRole("option");
+      trigger.focus();
+      await user.keyboard("{End}");
+      expect(options[2]).toHaveFocus();
+      act(() => {
+        for (const callback of frames.values()) callback(0);
+        frames.clear();
+      });
+      expect(options[2]).toHaveFocus();
+      rerender(<PickerHarness empty />);
+      trigger.focus();
+      await user.keyboard("{Escape}");
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+    } finally {
+      unmount();
+      vi.restoreAllMocks();
+    }
   });
 
   it("opens an empty model list upward when the space below is too small", () => {
