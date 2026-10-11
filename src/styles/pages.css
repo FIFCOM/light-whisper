@@ -699,6 +699,7 @@
 
 .history-latency-strip span {
   display: inline-flex;
+  align-items: baseline;
   gap: 3px;
   color: var(--color-text-tertiary);
   font-family: var(--font-mono);
