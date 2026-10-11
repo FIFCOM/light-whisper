@@ -5,7 +5,7 @@ classes, credentials/OAuth, providers/settings/personalization, context/routing,
 selection/assistant, history, windows/subtitles, updates, theme/autostart and
 bundled protocols.
 
-[`verification.json`](verification.json) binds **123 registered commands**,
+[`verification.json`](verification.json) binds **124 registered commands**,
 **16 event families**, **16 lifecycle entries** and **11 protocol families** to
 obligations, model operators, source/test paths and explicit assumptions. CI
 rejects inventory drift, missing anchors, unasserted properties, unreachable
@@ -43,6 +43,21 @@ AppWorkflow is the additional integrated model. The registry is the authoritativ
 positive configuration/negative-control list. Operator names and concrete
 source/test anchors are recorded per contract there.
 
+AppWorkflow separates routed external search and fresh screen preparation from
+LLM dispatch. Both preparations settle before dispatch, and fresh screen payloads
+are checked against the foreground identity sampled after the join. This sample
+does not prevent later OS focus changes. ModelNative search executes inside the
+LLM request; reused pre-polish descriptions retain their existing semantics and
+have Rust regression coverage.
+
+History audio I/O may remain pending during ASR and LLM work. Audio resolution and
+the history persistence attempt settle before terminal transcription/subtitle
+publication and paste authorization, including failed writes. Assistant stream
+chunks and stream done are emitted during LLM work and are outside this ordering
+claim. SettingsProfileLoad checks one representative preference through failed
+initial load, retry and saved-value restoration without multiplying the existing
+full field workload. See [optimization correspondence](evidence/optimization-20261011.md).
+
 ## Reproduce
 
 Use Python 3.10+, Java 21, official TLA+ tools **1.7.4** and Lean **4.34.1**.
@@ -66,7 +81,8 @@ The binding gate treats actions and properties separately. Only named actions
 with state updates may use execution coverage. Every mapped safety/liveness
 property must be an actual configured INVARIANT/PROPERTY, or a positive conjunct
 of one. References inside negation, implication, comments or strings never count
-as checking that property. Ten verifier regressions exercise this distinction.
+as checking that property. Eleven verifier regressions cover this distinction
+and equality between the CI and verifier TLC checksum pins.
 
 ## Proof boundary
 

@@ -1,5 +1,8 @@
 # Implementation correspondence and repair evidence
 
+Current optimization correspondence: [2026-10-11 verification](optimization-20261011.md).
+The earlier PR #9/PR #10 baselines and results below remain historical evidence.
+
 Baseline: d29cd45db8876bd7bcfa915ae642af3b0fcc4bbe, PR #9.
 
 | Boundary | Before | Repair/evidence |

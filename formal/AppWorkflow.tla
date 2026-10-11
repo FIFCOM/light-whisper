@@ -55,8 +55,10 @@ Init == app = [
   historyAllowed |-> Workload = "History",
   audioAllowed |-> Workload = "History",
   screenAllowed |-> FALSE, screenUsed |-> FALSE,
-  screenshotWindow |-> "Unknown",
+  screenshotWindow |-> "Unknown", screenPrep |-> "None",
+  screenSent |-> FALSE, dispatchWindow |-> "Unknown",
   historyStored |-> Workload = "History",
+  historyFinalized |-> Workload = "History", audioWrite |-> "None",
   audioStored |-> Workload = "History",
   audioFileExists |-> Workload = "History", audioLease |-> FALSE,
   reprocess |-> "Idle", historyQueried |-> FALSE, historyExported |-> FALSE,
@@ -109,7 +111,7 @@ SwitchEngine ==
   /\ AllowManagement
   /\ app.engineSwitches = 0 /\ app.engineRequest = "Pending"
   /\ app.download \notin {"Running", "Cancelling"}
-  /\ app.rec \notin {"Starting", "Recording", "Asr", "PostAsr", "Llm"}
+  /\ app.rec \notin {"Starting", "Recording", "Asr", "PostAsr", "Preparing", "Llm"}
   /\ app' = [app EXCEPT
        !.engine = "Cloud", !.runtime = "NeedKey",
        !.configEpoch = @ + 1, !.engineSwitches = 1,
@@ -118,7 +120,7 @@ SwitchEngine ==
 RejectEngineSwitch ==
   /\ app.engineRequest = "Pending"
   /\ (app.download \in {"Running", "Cancelling"}
-      \/ app.rec \in {"Starting", "Recording", "Asr", "PostAsr", "Llm"})
+      \/ app.rec \in {"Starting", "Recording", "Asr", "PostAsr", "Preparing", "Llm"})
   /\ app' = [app EXCEPT !.engineRequest = "Blocked"]
 
 SetAsrCredential ==
@@ -185,7 +187,9 @@ StopRecording ==
        !.rec = "Asr",
        !.historyAllowed = app.historyOn /\ app.target # "Unknown",
        !.audioAllowed = app.historyOn /\ app.audioOn
-                        /\ app.target # "Unknown"]
+                        /\ app.target # "Unknown",
+       !.audioWrite = IF app.historyOn /\ app.audioOn /\ app.target # "Unknown"
+                     THEN "Running" ELSE "None"]
 
 AsrText ==
   /\ app.rec = "Asr"
@@ -213,18 +217,36 @@ StartLlm ==
   /\ app.rec = "PostAsr"
   /\ (app.mode # "Dictation" \/ app.polishMode \in {"On", "Auto"})
   /\ app' = [app EXCEPT
-       !.rec = "Llm",
+       !.rec = IF app.mode = "Assistant" THEN "Preparing" ELSE "Llm",
        !.screenAllowed = app.screenOn /\ app.target # "Unknown"
                           /\ app.target = app.foreground,
+       !.screenPrep = IF app.mode = "Assistant" THEN "Pending" ELSE "None",
        !.webAllowed = app.webOn /\ app.mode = "Assistant"]
 
 UseScreenContext ==
-  /\ app.rec = "Llm"
+  /\ app.rec \in {"Preparing", "Llm"}
   /\ app.screenAllowed
   /\ app.target = app.foreground
   /\ ~app.screenUsed
   /\ app' = [app EXCEPT !.screenUsed = TRUE,
-       !.screenshotWindow = app.foreground]
+       !.screenshotWindow = app.foreground,
+       !.screenPrep = IF app.rec = "Preparing" THEN "Ready" ELSE @]
+
+FinishScreenWithoutContext ==
+  /\ app.rec = "Preparing" /\ app.screenPrep = "Pending"
+  /\ app' = [app EXCEPT !.screenPrep = "Unavailable"]
+
+\* External third-party search and fresh screen preparation join before
+\* dispatch; ModelNative search runs inside the LLM request instead.
+\* The post-join foreground read is a snapshot, not an OS focus lock.
+DispatchAssistant ==
+  /\ app.rec = "Preparing"
+  /\ app.screenPrep \in {"Ready", "Unavailable"}
+  /\ ~app.webAllowed \/ app.webSearch \in {"Sources", "Unavailable"}
+  /\ app' = [app EXCEPT !.rec = "Llm",
+       !.dispatchWindow = app.foreground,
+       !.screenSent = app.screenUsed /\ app.target = app.foreground,
+       !.screenUsed = app.screenUsed /\ app.target = app.foreground]
 
 LlmSuccess ==
   /\ app.rec = "Llm"
@@ -243,21 +265,32 @@ LlmFailure ==
 SaveHistory ==
   /\ app.rec \in {"Finished", "Failed"}
   /\ app.historyAllowed
+  /\ app.audioWrite # "Running"
   /\ ~app.historyStored
-  /\ app' = [app EXCEPT !.historyStored = TRUE]
+  /\ app' = [app EXCEPT !.historyStored = TRUE, !.historyFinalized = TRUE]
+
+HistoryWriteFailure ==
+  /\ app.rec \in {"Finished", "Failed"}
+  /\ app.historyAllowed /\ ~app.historyFinalized
+  /\ app.audioWrite # "Running"
+  /\ app' = [app EXCEPT !.historyFinalized = TRUE]
 
 SaveAudio ==
-  /\ app.rec \in {"Asr", "PostAsr", "Llm", "Finished", "Failed"}
+  /\ app.rec \in {"Asr", "PostAsr", "Preparing", "Llm", "Finished", "Failed"}
   /\ app.audioAllowed
+  /\ app.audioWrite = "Running"
   /\ ~app.audioStored
   /\ app' = [app EXCEPT !.audioStored = TRUE,
-       !.audioFileExists = TRUE]
+       !.audioFileExists = TRUE, !.audioWrite = "Done"]
 
-\* The assistant may query the web only when its effective profile allows it.
+AudioWriteFailure ==
+  /\ app.audioWrite = "Running"
+  /\ app' = [app EXCEPT !.audioWrite = "Done"]
+
+\* The assistant prepares external search only when its effective profile allows it.
 \* Both success and failure return to the normal answer path.
 StartWebSearch ==
-  /\ Workload = "AssistantWeb"
-  /\ app.rec = "Llm" /\ app.mode = "Assistant"
+  /\ app.rec = "Preparing" /\ app.mode = "Assistant"
   /\ app.webAllowed /\ app.webSearch = "None"
   /\ app' = [app EXCEPT !.webSearch = "Running"]
 
@@ -269,6 +302,7 @@ FinishWebSearch(outcome) ==
 DisplayResult ==
   /\ app.rec = "Finished"
   /\ app.result \in {"Raw", "Processed", "Assistant"}
+  /\ ~app.historyAllowed \/ app.historyFinalized
   /\ ~app.displayed
   /\ app' = [app EXCEPT !.displayed = TRUE]
 
@@ -276,6 +310,7 @@ QueuePaste ==
   /\ app.rec = "Finished"
   /\ app.mode # "Assistant"
   /\ app.result \in {"Raw", "Processed"}
+  /\ ~app.historyAllowed \/ app.historyFinalized
   /\ app.paste = "None"
   /\ app' = [app EXCEPT !.paste = "Queued"]
 
@@ -424,6 +459,7 @@ InterimSubtitle(session) ==
 FinalSubtitle ==
   /\ Workload = "Subtitles" /\ app.rec = "Finished"
   /\ app.subtitle \in {"Visible", "Interim"}
+  /\ ~app.historyAllowed \/ app.historyFinalized
   /\ app' = [app EXCEPT !.subtitle = "Final", !.subtitleFinalSeen = TRUE]
 
 ReprocessHistory ==
@@ -470,10 +506,12 @@ Next ==
   \/ \E mode \in Modes: StartRecording(mode)
   \/ CaptureReady \/ CancelStarting \/ StopRecording
   \/ AsrText \/ AsrFailure \/ NoSpeech \/ SkipPolish
-  \/ StartLlm \/ UseScreenContext \/ LlmSuccess \/ LlmFailure
+  \/ StartLlm \/ UseScreenContext \/ FinishScreenWithoutContext
+  \/ DispatchAssistant \/ LlmSuccess \/ LlmFailure
   \/ StartWebSearch
   \/ \E outcome \in {"Sources", "Unavailable"}: FinishWebSearch(outcome)
-  \/ SaveHistory \/ SaveAudio \/ DisplayResult \/ QueuePaste
+  \/ SaveHistory \/ HistoryWriteFailure \/ SaveAudio \/ AudioWriteFailure
+  \/ DisplayResult \/ QueuePaste
   \/ BeginPaste \/ ExternalClipboardChange \/ FinishPaste
   \/ DetectSelection \/ ExternalSelectionChange
   \/ \E action \in SelectionActions: StartSelectionAction(action)
@@ -499,12 +537,15 @@ TypeOK ==
   /\ app.download \in {"Idle", "Running", "Cancelling", "Done"}
   /\ app.engineRequest \in {"None", "Pending", "Blocked", "Done"}
   /\ app.rec \in {"Idle", "Starting", "Recording", "Asr", "PostAsr",
-                  "Llm", "Finished", "Failed", "Cancelled"}
+                  "Preparing", "Llm", "Finished", "Failed", "Cancelled"}
   /\ app.mode \in Modes \cup {"None"}
   /\ app.target \in Windows
   /\ app.foreground \in Windows
   /\ app.foregroundChanges \in 0..1
   /\ app.screenshotWindow \in Windows
+  /\ app.dispatchWindow \in Windows
+  /\ app.screenPrep \in {"None", "Pending", "Ready", "Unavailable"}
+  /\ app.audioWrite \in {"None", "Running", "Done"}
   /\ app.asr \in {"None", "Text", "Empty", "Error"}
   /\ app.result \in {"None", "Raw", "Processed", "Assistant", "Error"}
   /\ app.webSearch \in {"None", "Running", "Sources", "Unavailable"}
@@ -534,6 +575,17 @@ AudioConsent == ~app.audioStored \/ app.audioAllowed
 ScreenConsent == ~app.screenUsed \/ app.screenAllowed
 ScreenStaysOnCapturedWindow ==
   ~app.screenUsed \/ app.screenshotWindow = app.target
+FreshScreenIsCurrentAtDispatch ==
+  ~app.screenSent \/ app.screenshotWindow = app.dispatchWindow
+AssistantPreparationSettlesBeforeDispatch ==
+  app.mode # "Assistant" \/ app.rec # "Llm"
+    \/ (app.screenPrep \in {"Ready", "Unavailable"}
+        /\ (~app.webAllowed \/ app.webSearch \in {"Sources", "Unavailable"}))
+HistorySettlesBeforePublication ==
+  \* Terminal transcription/subtitle result and paste authorization only.
+  \* Assistant stream chunks/done can arrive before audio/history settles.
+  ~(app.displayed \/ app.paste # "None" \/ app.subtitleFinalSeen)
+    \/ ~app.historyAllowed \/ (app.historyFinalized /\ app.audioWrite # "Running")
 DownloadPinsConfig ==
   app.download \notin {"Running", "Cancelling"}
     \/ app.downloadEpoch = app.configEpoch
@@ -569,6 +621,8 @@ GpuStreamHasRuntime == Workload # "GpuIdle" \/ app.rec # "Recording" \/ app.gpuL
 Safety ==
   /\ HistoryConsent /\ AudioConsent /\ ScreenConsent
   /\ ScreenStaysOnCapturedWindow /\ DownloadPinsConfig
+  /\ FreshScreenIsCurrentAtDispatch /\ AssistantPreparationSettlesBeforeDispatch
+  /\ HistorySettlesBeforePublication
   /\ AssistantNeverPastes /\ PasteHasText
   /\ SelectionResultIsCurrent /\ SelectionReplaceIsAuthorized
   /\ ExternalClipboardIsPreserved /\ SavedSettingsNotFuture

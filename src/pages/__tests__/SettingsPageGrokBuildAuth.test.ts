@@ -205,12 +205,7 @@ describe("SettingsPage Grok Build dual-auth contract", () => {
     expect(settingsPage).toMatch(/p\.llm_provider\.xai_auth_mode/);
   });
 
-  it("refreshes Grok Build status on settings load and refreshes models after login", () => {
-    expect(settingsPage).toContain("refreshGrokBuildOauthStatus");
-    expect(settingsPage).toContain("getGrokBuildOauthStatus");
-    expect(settingsPage).toMatch(
-      /refreshProfile\(\)\.then\([\s\S]*refreshGrokBuildOauthStatus/,
-    );
+  it("refreshes models after Grok Build login", () => {
     expect(settingsPage).toContain("finalizeGrokBuildOauthLogin");
     expect(settingsPage).toMatch(
       /finalizeGrokBuildOauthLogin[\s\S]*refreshAiModels\(true\)/,

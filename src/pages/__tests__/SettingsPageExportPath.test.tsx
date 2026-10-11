@@ -332,6 +332,7 @@ describe("SettingsPage navigation", () => {
   it("scrolls only the settings content container when a navigation tab is clicked", async () => {
     const { default: SettingsPage } = await import("@/pages/SettingsPage");
     const rendered = render(<SettingsPage active onNavigate={vi.fn()} />);
+    await screen.findByRole("button", { name: "History settings" });
     const content = rendered.container.querySelector<HTMLElement>(".settings-content");
     const target = rendered.container.querySelector<HTMLElement>(
       '[data-nav-id="history-settings"]',
@@ -364,8 +365,8 @@ describe("SettingsPage navigation", () => {
   it("maps the startup navigation tab to the startup section", async () => {
     const { default: SettingsPage } = await import("@/pages/SettingsPage");
     const rendered = render(<SettingsPage active onNavigate={vi.fn()} />);
-    const content = rendered.container.querySelector<HTMLElement>(".settings-content");
     const startupHeading = await screen.findByRole("heading", { name: "Startup" });
+    const content = rendered.container.querySelector<HTMLElement>(".settings-content");
     const startupSection = startupHeading.closest<HTMLElement>("section");
 
     expect(content).not.toBeNull();

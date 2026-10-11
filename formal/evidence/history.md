@@ -1,5 +1,31 @@
 # HistoryRecords formal evidence
 
+## 2026-10-11 finalization overlap extension
+
+AppWorkflow now separates the history audio write (`audioWrite`) from ASR/LLM
+processing and the history persistence attempt (`historyFinalized`). `StartLlm`
+does not wait for audio I/O. Successful or failed audio writes settle before
+`SaveHistory`/`HistoryWriteFailure`; terminal transcription/subtitle results and
+paste authorization require the finalized attempt. Assistant stream chunks and
+stream done emitted during LLM work are excluded from this ordering claim.
+
+The source path is `audio_service/finalize.rs::finalize_recording`, from the
+consent-gated spawned `history_service::save_audio` through branch-local
+`resolve_history_audio` and `HistorySessionContext::persist`. Both audio errors
+and persistence errors retain the existing text/result path. This is bounded
+ordering evidence, not a timing or filesystem durability proof. The
+`history-publish-before-audio-resolves` mutation removes the audio settlement
+guard and must violate `HistorySettlesBeforePublication`.
+
+The production percentile regression compares empty, single, even/odd, tied,
+extreme and 100,000-element duplicate-heavy inputs against sorted rank selection.
+It preserves the previous rounded rank definition for p50/p95 while production
+uses `select_nth_unstable`. Runtime gate results and hashes are recorded in
+[optimization evidence](optimization-20261011.md).
+
+The historical HistoryRecords evidence below retains its original runtime and
+baseline. Current full checks use the pinned TLC 1.7.4 and Lean 4.34.1 runtimes.
+
 ## Scope and source baseline
 
 - Repository baseline: `d29cd45db8876bd7bcfa915ae642af3b0fcc4bbe`.

@@ -232,6 +232,10 @@ export default function SettingsPage({
 
   const { t } = useTranslation();
   const { isRecording, retryModel, hotkeyDisplay, setHotkey, hotkeyError, hotkeyDiagnostic } = useRecordingContext();
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileLoadError, setProfileLoadError] = useState(false);
+  const [profileLoadPending, setProfileLoadPending] = useState(false);
+  const settingsReady = profile !== null && !profileLoadError;
 
   // --- Settings nav sections ---
   const navSections = useMemo(() => [
@@ -293,6 +297,7 @@ export default function SettingsPage({
       navScrollTimer.current = setTimeout(finishScroll, 180);
     };
     const interruptScroll = () => { finishScroll(); };
+    updateSection();
     container.addEventListener("scroll", onScroll, { passive: true });
     container.addEventListener("scrollend", finishScroll);
     container.addEventListener("wheel", interruptScroll, { passive: true });
@@ -300,14 +305,14 @@ export default function SettingsPage({
     container.addEventListener("keydown", interruptScroll);
     return () => {
       cancelAnimationFrame(frame);
-      clearTimeout(navScrollTimer.current);
+      finishScroll();
       container.removeEventListener("scroll", onScroll);
       container.removeEventListener("scrollend", finishScroll);
       container.removeEventListener("wheel", interruptScroll);
       container.removeEventListener("touchstart", interruptScroll);
       container.removeEventListener("keydown", interruptScroll);
     };
-  }, [navSections]);
+  }, [navSections, settingsReady]);
 
   const handleNavClick = useCallback((id: string) => {
     const container = settingsContentRef.current;
@@ -347,7 +352,7 @@ export default function SettingsPage({
     updateIndicator();
     window.addEventListener("resize", updateIndicator);
     return () => window.removeEventListener("resize", updateIndicator);
-  }, [activeNavSection, active, t]);
+  }, [activeNavSection, active, t, settingsReady]);
 
   // --- Picker group (mutually exclusive dropdowns) ---
   type PickerId = "provider" | "model" | "assistantModel" | "assistantProvider" | "assistantReasoning" | "polishReasoning" | "recordingMode" | "microphone" | "webSearchProvider" | "language" | "alibabaModel" | "engine" | "chatgptAccount" | "assistantChatgptAccount" | "selectionChatgptAccount";
@@ -519,7 +524,6 @@ export default function SettingsPage({
   ]);
 
   // --- Profile & misc ---
-  const [profile, setProfile] = useState<UserProfile | null>(null);
   const [newHotWord, setNewHotWord] = useState("");
   const [translationTarget, setTranslationTargetState] = useState<string | null>(null);
   const [customPromptState, setCustomPromptState] = useState<string>("");
@@ -739,9 +743,11 @@ export default function SettingsPage({
 
   // 加载用户画像
   const refreshProfile = useCallback(async () => {
+    setProfileLoadPending(true);
     try {
       const p = await getUserProfile();
       setProfile(p);
+      setProfileLoadError(false);
       const cps = p.llm_provider.custom_providers ?? [];
       setCustomProviders(cps);
       const nextProvider = resolveEffectiveProvider(p.llm_provider.active || "cerebras", cps);
@@ -820,11 +826,19 @@ export default function SettingsPage({
       setValidationProvider(p.llm_provider.validation_provider ?? null);
       setValidationModel(p.llm_provider.validation_model ?? "");
       return p;
-    } catch { /* ignore */ }
+    } catch (error) {
+      console.error("Failed to load user profile:", error);
+      setProfileLoadError(true);
+      setCorrectionModalOpen(false);
+      return undefined;
+    } finally {
+      setProfileLoadPending(false);
+    }
   }, [updateProviderDraft]);
 
-  useEffect(() => {
-    refreshProfile().then((loadedProfile) => {
+  const refreshProfileAndKeys = useCallback(async () => {
+    const loadedProfile = await refreshProfile();
+    if (loadedProfile) {
       void refreshAssistantKey();
       void refreshOpenaiCodexOauthStatus();
       void refreshGrokBuildOauthStatus();
@@ -832,8 +846,12 @@ export default function SettingsPage({
         loadedProfile?.llm_provider.screen_vision_provider || DEFAULT_SCREEN_VISION_PROVIDER,
       );
       void refreshWebSearchKey(loadedProfile?.web_search?.provider ?? "model_native");
-    });
+    }
   }, [refreshProfile, refreshAssistantKey, refreshGrokBuildOauthStatus, refreshOpenaiCodexOauthStatus, refreshScreenVisionKey, refreshWebSearchKey]);
+
+  useEffect(() => {
+    void refreshProfileAndKeys();
+  }, [refreshProfileAndKeys]);
 
   const {
     appVersion,
@@ -2267,6 +2285,20 @@ export default function SettingsPage({
       />
 
       <div className={pageContentClass} style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+        {!settingsReady ? (
+          <div className="settings-content settings-load-state" role={profileLoadError ? "alert" : "status"}>
+            {profileLoadError ? (
+              <>
+                <AlertTriangle size={20} aria-hidden="true" />
+                <p>{t("settings.profileLoadFailed")}</p>
+                <button className="btn-ghost" type="button" disabled={profileLoadPending} onClick={() => void refreshProfileAndKeys()}>
+                  {t("common.retry")}
+                </button>
+              </>
+            ) : <p>{t("common.loading")}</p>}
+          </div>
+        ) : (
+          <>
         {/* Settings nav */}
         <nav className="settings-nav" ref={navScrollRef}>
           {navIndicatorStyle && (
@@ -3991,9 +4023,11 @@ export default function SettingsPage({
             {t("settings.footerSubtitle")}
           </p>
         </div>
+          </>
+        )}
       </div>
 
-      {correctionModalOpen && (
+      {profile && !profileLoadError && correctionModalOpen && (
         <Suspense fallback={null}>
           <CorrectionRulesModal
             profile={profile}

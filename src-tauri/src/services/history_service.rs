@@ -603,20 +603,20 @@ pub async fn list(query: HistoryQuery) -> Result<HistoryPage, String> {
     .map_err(|error| format!("查询转写历史任务失败: {error}"))?
 }
 
-fn percentile(values: &mut [u64], percentile: f64) -> Option<u64> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_unstable();
-    let index = ((values.len() - 1) as f64 * percentile).round() as usize;
-    values.get(index).copied()
-}
-
 fn latency_stats(mut values: Vec<u64>) -> LatencyStats {
-    let mut p95_values = values.clone();
+    if values.is_empty() {
+        return LatencyStats {
+            p50_ms: None,
+            p95_ms: None,
+        };
+    }
+    let p50_index = ((values.len() - 1) as f64 * 0.50).round() as usize;
+    let p95_index = ((values.len() - 1) as f64 * 0.95).round() as usize;
+    let p50_ms = *values.select_nth_unstable(p50_index).1;
+    let p95_ms = *values.select_nth_unstable(p95_index).1;
     LatencyStats {
-        p50_ms: percentile(&mut values, 0.50),
-        p95_ms: percentile(&mut p95_values, 0.95),
+        p50_ms: Some(p50_ms),
+        p95_ms: Some(p95_ms),
     }
 }
 
@@ -858,6 +858,35 @@ mod tests {
         let stats = latency_stats(vec![10, 20, 30, 40, 50]);
         assert_eq!(stats.p50_ms, Some(30));
         assert_eq!(stats.p95_ms, Some(50));
+    }
+
+    #[test]
+    fn latency_percentiles_match_sorted_rank_for_empty_tied_and_large_inputs() {
+        let mut cases = vec![
+            vec![],
+            vec![42],
+            vec![u64::MAX, 0],
+            vec![9, 1, 7, 3, 5],
+            vec![5; 101],
+            vec![0, 0, 0, 1, 1, 1, u64::MAX],
+        ];
+        cases.push((0_u64..100_000).rev().map(|i| (i * 37) % 997).collect());
+
+        for values in cases {
+            let stats = latency_stats(values.clone());
+            let mut sorted = values;
+            sorted.sort_unstable();
+            let rank = |percentile: f64| {
+                if sorted.is_empty() {
+                    None
+                } else {
+                    let index = ((sorted.len() - 1) as f64 * percentile).round() as usize;
+                    Some(sorted[index])
+                }
+            };
+            assert_eq!(stats.p50_ms, rank(0.50));
+            assert_eq!(stats.p95_ms, rank(0.95));
+        }
     }
 
     #[test]

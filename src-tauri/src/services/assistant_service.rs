@@ -92,6 +92,21 @@ impl AssistantRequestContext {
     }
 }
 
+fn discard_stale_screen_context(
+    request_context: &AssistantRequestContext,
+    needs_screen_capture: bool,
+    current_foreground: Option<&ForegroundApp>,
+    images: &mut Vec<LlmImageInput>,
+    description: &mut Option<String>,
+) -> bool {
+    if !needs_screen_capture || request_context.foreground_matches(current_foreground) {
+        return false;
+    }
+    images.clear();
+    *description = None;
+    true
+}
+
 const ASSISTANT_SYSTEM_PROMPT: &str = r#"
 <role>
 你是用户的语音助手，负责理解用户的语音指令并生成对应的目标文本。用户通过语音告诉你要做什么，你直接输出完成后的结果。
@@ -997,13 +1012,6 @@ async fn generate_content_inner(
     );
 
     let system_prompt = state.with_profile(build_assistant_system_prompt);
-    let mut external_search_context = None;
-    let mut search_elapsed_ms = None;
-
-    // ── 联网搜索 ──
-    // 先用本地意图判断避免无关搜索；实时/事实/显式查询再进入搜索路径。
-    // 原生模式：注入 tool，模型在需要时调用；不支持的模型会在下方 retry 时去掉 web_search。
-    // 第三方模式：先搜索，再将不可信结果作为用户侧上下文交给模型。
     let web_search_decision = assistant_search_for_mode(
         effective_ws.enabled,
         search_routing,
@@ -1014,174 +1022,213 @@ async fn generate_content_inner(
     let use_native_search = effective_ws.enabled
         && effective_ws.provider == WebSearchProvider::ModelNative
         && web_search_decision.should_search;
+    let search_context = async {
+        let mut external_search_context = None;
+        let mut search_elapsed_ms = None;
 
-    if effective_ws.enabled
-        && effective_ws.provider != WebSearchProvider::ModelNative
-        && web_search_decision.should_search
-    {
-        // 通知前端：正在搜索
-        let search_query = contextual_search_query(asr_text, conversation);
-        let _ = app_handle.emit(
-            stream_event,
-            serde_json::json!({
-                "sessionId": session_id,
-                "status": "searching",
-                "query": search_query,
-                "searchProvider": effective_ws.provider,
-            }),
-        );
+        // ── 联网搜索 ──
+        // 先用本地意图判断避免无关搜索；实时/事实/显式查询再进入搜索路径。
+        // 原生模式：注入 tool，模型在需要时调用；不支持的模型会在下方 retry 时去掉 web_search。
+        // 第三方模式：先搜索，再将不可信结果作为用户侧上下文交给模型。
+        if effective_ws.enabled
+            && effective_ws.provider != WebSearchProvider::ModelNative
+            && web_search_decision.should_search
+        {
+            // 通知前端：正在搜索
+            let search_query = contextual_search_query(asr_text, conversation);
+            let _ = app_handle.emit(
+                stream_event,
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "status": "searching",
+                    "query": search_query,
+                    "searchProvider": effective_ws.provider,
+                }),
+            );
 
-        let search_started = Instant::now();
-        match run_third_party_search(state, &effective_ws, &search_query).await {
-            Ok(search_output) => {
-                let elapsed_ms = search_started.elapsed().as_millis() as u64;
-                search_elapsed_ms = Some(elapsed_ms);
-                let results = web_search_service::dedupe_search_results(search_output.results);
-                log::info!(
-                    "联网搜索({:?})返回 {} 条去重结果 (查询{}字符)",
-                    effective_ws.provider,
-                    results.len(),
-                    search_query.chars().count()
-                );
-                let _ = app_handle.emit(
-                    stream_event,
-                    serde_json::json!({
-                        "sessionId": session_id,
-                        "status": "search_complete",
-                        "query": search_query,
-                        "searchProvider": effective_ws.provider,
-                        "elapsedMs": elapsed_ms,
-                        "sources": search_source_payloads(&results),
-                        "googleSearchEntryPoint": search_output.google_search_entry_point,
-                    }),
-                );
-                external_search_context = Some(web_search_service::render_search_context(&results));
+            let search_started = Instant::now();
+            match run_third_party_search(state, &effective_ws, &search_query).await {
+                Ok(search_output) => {
+                    let elapsed_ms = search_started.elapsed().as_millis() as u64;
+                    search_elapsed_ms = Some(elapsed_ms);
+                    let results = web_search_service::dedupe_search_results(search_output.results);
+                    log::info!(
+                        "联网搜索({:?})返回 {} 条去重结果 (查询{}字符)",
+                        effective_ws.provider,
+                        results.len(),
+                        search_query.chars().count()
+                    );
+                    let _ = app_handle.emit(
+                        stream_event,
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "status": "search_complete",
+                            "query": search_query,
+                            "searchProvider": effective_ws.provider,
+                            "elapsedMs": elapsed_ms,
+                            "sources": search_source_payloads(&results),
+                            "googleSearchEntryPoint": search_output.google_search_entry_point,
+                        }),
+                    );
+                    external_search_context =
+                        Some(web_search_service::render_search_context(&results));
+                }
+                Err(err) => {
+                    let elapsed_ms = search_started.elapsed().as_millis() as u64;
+                    search_elapsed_ms = Some(elapsed_ms);
+                    log::warn!(
+                        "联网搜索({:?})失败，继续无搜索上下文: {err}",
+                        effective_ws.provider
+                    );
+                    let _ = app_handle.emit(
+                        stream_event,
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "status": "search_error",
+                            "query": search_query,
+                            "searchProvider": effective_ws.provider,
+                            "elapsedMs": elapsed_ms,
+                            "message": err,
+                        }),
+                    );
+                    external_search_context =
+                        Some(web_search_service::render_search_failure_context());
+                }
             }
-            Err(err) => {
-                let elapsed_ms = search_started.elapsed().as_millis() as u64;
-                search_elapsed_ms = Some(elapsed_ms);
-                log::warn!(
-                    "联网搜索({:?})失败，继续无搜索上下文: {err}",
-                    effective_ws.provider
-                );
-                let _ = app_handle.emit(
-                    stream_event,
-                    serde_json::json!({
-                        "sessionId": session_id,
-                        "status": "search_error",
-                        "query": search_query,
-                        "searchProvider": effective_ws.provider,
-                        "elapsedMs": elapsed_ms,
-                        "message": err,
-                    }),
-                );
-                external_search_context = Some(web_search_service::render_search_failure_context());
-            }
-        }
-    } else if effective_ws.enabled && !web_search_decision.should_search {
-        log::info!(
-            "助手联网搜索跳过: provider={:?}, reason={}",
-            effective_ws.provider,
-            web_search_decision.reason
-        );
-    }
-
-    let reusable_screen_description =
-        request_context.reusable_screen_context_description(screen_context_enabled);
-    let needs_screen_capture = screen_context_enabled && reusable_screen_description.is_none();
-    let image_support_cache_key = llm_provider::image_support_cache_key(&endpoint);
-    let cached_image_support = state.assistant_image_support(&image_support_cache_key);
-    let probed_image_support = if needs_screen_capture && cached_image_support.is_none() {
-        let support = llm_provider::probe_image_support_from_provider_metadata(
-            &state.http_client,
-            &endpoint,
-            &api_key,
-        )
-        .await;
-        if let Some(supported) = support {
-            state.set_assistant_image_support(image_support_cache_key.clone(), supported);
+        } else if effective_ws.enabled && !web_search_decision.should_search {
             log::info!(
-                "根据模型元数据识别图片输入支持: provider={}, model={}, supported={}",
-                endpoint.provider,
-                endpoint.model,
-                supported
+                "助手联网搜索跳过: provider={:?}, reason={}",
+                effective_ws.provider,
+                web_search_decision.reason
             );
         }
-        support
-    } else {
-        None
+        (external_search_context, search_elapsed_ms)
     };
-    let effective_image_support = grok_build_oauth_service::resolve_image_support_for_request(
-        &api_key,
-        cached_image_support.or(probed_image_support),
-    );
-    let screen_vision_enabled = screen_vision_service::is_enabled(state);
 
-    let foreground_still_matches = || {
-        let current = crate::utils::foreground::get_foreground_app();
-        request_context.foreground_matches(current.as_ref())
-    };
-    let mut images = if needs_screen_capture
-        && (effective_image_support != Some(false) || screen_vision_enabled)
-        && foreground_still_matches()
-    {
-        match screen_capture_service::capture_full_screen_context_async().await {
-            Ok(captured) if foreground_still_matches() => {
-                if !captured.is_empty() {
-                    log::info!("助手模式已附带屏幕截图上下文: {} 张", captured.len());
-                }
-                captured
-                    .into_iter()
-                    .map(|image| LlmImageInput {
-                        mime_type: image.mime_type,
-                        data_base64: image.data_base64,
-                    })
-                    .collect::<Vec<_>>()
+    let screen_context = async {
+        let reusable_screen_description =
+            request_context.reusable_screen_context_description(screen_context_enabled);
+        let needs_screen_capture = screen_context_enabled && reusable_screen_description.is_none();
+        let image_support_cache_key = llm_provider::image_support_cache_key(&endpoint);
+        let cached_image_support = state.assistant_image_support(&image_support_cache_key);
+        let probed_image_support = if needs_screen_capture && cached_image_support.is_none() {
+            let support = llm_provider::probe_image_support_from_provider_metadata(
+                &state.http_client,
+                &endpoint,
+                &api_key,
+            )
+            .await;
+            if let Some(supported) = support {
+                state.set_assistant_image_support(image_support_cache_key.clone(), supported);
+                log::info!(
+                    "根据模型元数据识别图片输入支持: provider={}, model={}, supported={}",
+                    endpoint.provider,
+                    endpoint.model,
+                    supported
+                );
             }
-            Ok(_) => {
-                log::warn!("助手截图后前台窗口已变化，丢弃截图并继续纯文本请求");
-                Vec::new()
-            }
-            Err(err) => {
-                log::warn!("截取屏幕上下文失败，继续纯文本助手请求: {}", err);
-                Vec::new()
-            }
-        }
-    } else {
-        if needs_screen_capture && effective_image_support == Some(false) && !screen_vision_enabled
+            support
+        } else {
+            None
+        };
+        let effective_image_support = grok_build_oauth_service::resolve_image_support_for_request(
+            &api_key,
+            cached_image_support.or(probed_image_support),
+        );
+        let screen_vision_enabled = screen_vision_service::is_enabled(state);
+
+        let foreground_still_matches = || {
+            let current = crate::utils::foreground::get_foreground_app();
+            request_context.foreground_matches(current.as_ref())
+        };
+        let mut images = if needs_screen_capture
+            && (effective_image_support != Some(false) || screen_vision_enabled)
+            && foreground_still_matches()
         {
-            log::info!(
+            match screen_capture_service::capture_full_screen_context_async().await {
+                Ok(captured) if foreground_still_matches() => {
+                    if !captured.is_empty() {
+                        log::info!("助手模式已附带屏幕截图上下文: {} 张", captured.len());
+                    }
+                    captured
+                        .into_iter()
+                        .map(|image| LlmImageInput {
+                            mime_type: image.mime_type,
+                            data_base64: image.data_base64,
+                        })
+                        .collect::<Vec<_>>()
+                }
+                Ok(_) => {
+                    log::warn!("助手截图后前台窗口已变化，丢弃截图并继续纯文本请求");
+                    Vec::new()
+                }
+                Err(err) => {
+                    log::warn!("截取屏幕上下文失败，继续纯文本助手请求: {}", err);
+                    Vec::new()
+                }
+            }
+        } else {
+            if needs_screen_capture
+                && effective_image_support == Some(false)
+                && !screen_vision_enabled
+            {
+                log::info!(
                 "当前助手模型不支持图片输入且视觉代理已关闭，跳过屏幕截图上下文: provider={}, model={}",
                 endpoint.provider,
                 endpoint.model
             );
-        } else if needs_screen_capture && !foreground_still_matches() {
-            log::warn!("助手截图已跳过：前台窗口已离开录音开始时的目标应用");
-        }
-        Vec::new()
+            } else if needs_screen_capture && !foreground_still_matches() {
+                log::warn!("助手截图已跳过：前台窗口已离开录音开始时的目标应用");
+            }
+            Vec::new()
+        };
+
+        let screen_description = if let Some(description) = reusable_screen_description {
+            log::info!(
+                "助手复用前置润色视觉描述: {}字符",
+                description.chars().count()
+            );
+            Some(description)
+        } else if effective_image_support == Some(false) && !images.is_empty() {
+            match screen_vision_service::describe_images(state, app_handle, &images).await {
+                Ok(description) => {
+                    images.clear();
+                    Some(description)
+                }
+                Err(err) => {
+                    log::warn!("助手视觉代理读取失败，继续无屏幕上下文请求: {}", err);
+                    images.clear();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        (
+            images,
+            screen_description,
+            image_support_cache_key,
+            needs_screen_capture,
+        )
     };
 
-    let screen_description = if let Some(description) = reusable_screen_description {
-        log::info!(
-            "助手复用前置润色视觉描述: {}字符",
-            description.chars().count()
-        );
-        Some(description)
-    } else if effective_image_support == Some(false) && !images.is_empty() {
-        match screen_vision_service::describe_images(state, app_handle, &images).await {
-            Ok(description) => {
-                images.clear();
-                Some(description)
-            }
-            Err(err) => {
-                log::warn!("助手视觉代理读取失败，继续无屏幕上下文请求: {}", err);
-                images.clear();
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // 路由完成后的搜索和屏幕准备相互独立，保留在可取消的请求 future 内。
+    let (
+        (external_search_context, search_elapsed_ms),
+        (mut images, mut screen_description, image_support_cache_key, needs_screen_capture),
+    ) = tokio::join!(search_context, screen_context);
+    let current_foreground = needs_screen_capture
+        .then(crate::utils::foreground::get_foreground_app)
+        .flatten();
+    if discard_stale_screen_context(
+        &request_context,
+        needs_screen_capture,
+        current_foreground.as_ref(),
+        &mut images,
+        &mut screen_description,
+    ) {
+        log::warn!("助手上下文准备期间前台窗口已变化，丢弃屏幕上下文");
+    }
     let has_screen_context = !images.is_empty() || screen_description.is_some();
 
     let mut user_content = if let Some(conversation) = conversation {
@@ -1362,10 +1409,12 @@ mod tests {
     use super::assistant_search_for_mode;
     use super::{
         build_assistant_request_options, build_conversation_user_content, contextual_search_query,
-        decide_assistant_web_search, normalized_search_query, render_assistant_system_prompt_at,
-        render_assistant_user_content, AssistantConversationTurn, AssistantRequestContext,
-        ConversationContext, ASSISTANT_CHAT_STREAM_EVENT, ASSISTANT_STREAM_EVENT,
+        decide_assistant_web_search, discard_stale_screen_context, normalized_search_query,
+        render_assistant_system_prompt_at, render_assistant_user_content,
+        AssistantConversationTurn, AssistantRequestContext, ConversationContext,
+        ASSISTANT_CHAT_STREAM_EVENT, ASSISTANT_STREAM_EVENT,
     };
+    use crate::services::llm_client::LlmImageInput;
     use crate::state::user_profile::LlmReasoningMode;
     use crate::state::user_profile::UserProfile;
     use crate::utils::foreground::ForegroundApp;
@@ -1417,6 +1466,94 @@ mod tests {
         assert!(!context.foreground_matches(None));
         assert!(!AssistantRequestContext::for_recording(true, None, None).foreground_matches(None));
         assert!(AssistantRequestContext::default().foreground_matches(Some(&switched)));
+    }
+
+    #[test]
+    fn fresh_screen_payload_is_discarded_when_foreground_changes_during_preparation() {
+        let recorded = ForegroundApp {
+            process_name: "Code.exe".into(),
+            window_title: "README - Code".into(),
+        };
+        let context = AssistantRequestContext::for_recording(true, Some(recorded.clone()), None);
+        for current in [
+            Some(ForegroundApp {
+                process_name: "chrome.exe".into(),
+                window_title: recorded.window_title.clone(),
+            }),
+            Some(ForegroundApp {
+                process_name: recorded.process_name.clone(),
+                window_title: "private.txt - Code".into(),
+            }),
+            None,
+        ] {
+            let mut images = vec![LlmImageInput {
+                mime_type: "image/png".into(),
+                data_base64: "fresh-image".into(),
+            }];
+            let mut description = Some("fresh screen description".into());
+
+            assert!(discard_stale_screen_context(
+                &context,
+                true,
+                current.as_ref(),
+                &mut images,
+                &mut description,
+            ));
+            assert!(images.is_empty());
+            assert!(description.is_none());
+        }
+    }
+
+    #[test]
+    fn fresh_screen_payload_survives_when_recording_foreground_still_matches() {
+        let recorded = ForegroundApp {
+            process_name: "Code.exe".into(),
+            window_title: "README - Code".into(),
+        };
+        let context = AssistantRequestContext::for_recording(true, Some(recorded.clone()), None);
+        let mut images = vec![LlmImageInput {
+            mime_type: "image/png".into(),
+            data_base64: "fresh-image".into(),
+        }];
+        let mut description = Some("fresh screen description".into());
+
+        assert!(!discard_stale_screen_context(
+            &context,
+            true,
+            Some(&recorded),
+            &mut images,
+            &mut description,
+        ));
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].data_base64, "fresh-image");
+        assert!(description.is_some());
+    }
+
+    #[test]
+    fn reused_polish_description_survives_a_later_foreground_change() {
+        let recorded = ForegroundApp {
+            process_name: "Code.exe".into(),
+            window_title: "README - Code".into(),
+        };
+        let switched = ForegroundApp {
+            process_name: "chrome.exe".into(),
+            window_title: "Inbox".into(),
+        };
+        let context = AssistantRequestContext::for_recording(true, Some(recorded), None)
+            .with_screen_context_description(Some("pre-polish description".into()));
+        for current in [Some(&switched), None] {
+            let mut images = vec![];
+            let mut description = context.reusable_screen_context_description(true);
+
+            assert!(!discard_stale_screen_context(
+                &context,
+                false,
+                current,
+                &mut images,
+                &mut description,
+            ));
+            assert_eq!(description.as_deref(), Some("pre-polish description"));
+        }
     }
 
     #[test]

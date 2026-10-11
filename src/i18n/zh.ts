@@ -272,6 +272,7 @@ const zh = {
     gpuIdleSeconds: "空闲时间（秒）",
     gpuIdleSaveFailed: "GPU 空闲卸载设置保存失败",
     title: "设置",
+    profileLoadFailed: "无法读取设置。请重试后再修改。",
     appearance: "外观",
     themeLight: "浅色",
     themeDark: "深色",

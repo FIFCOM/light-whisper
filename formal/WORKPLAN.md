@@ -45,7 +45,8 @@ machine-code refinement proof.
 | Credential publication | Phased storage/cache ownership, captured auth choices and account pairing | Web key setters/getters/startup, all LLM/catalog auth callers |
 | UI disposal/cancellation | Revoked timers, stale promise completion and retired listeners | Model download and recording hooks |
 
-The verifier itself has ten regression cases: a reachable predicate is not an
+The verifier itself has eleven regression cases, including the CI/verifier TLC
+checksum pin comparison: a reachable predicate is not an
 asserted property, and references under negation/implication, strings or comments
 cannot establish an obligation. Only explicit state-changing actions may use
 reachability evidence.

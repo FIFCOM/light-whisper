@@ -274,6 +274,7 @@ const en: TranslationSchema = {
     gpuIdleSeconds: "Idle time (seconds)",
     gpuIdleSaveFailed: "Could not save the GPU idle setting",
     title: "Settings",
+    profileLoadFailed: "Could not load settings. Retry before making changes.",
     appearance: "Appearance",
     themeLight: "Light",
     themeDark: "Dark",

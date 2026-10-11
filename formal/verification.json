@@ -871,12 +871,16 @@
       "assumptions": "Debounce timer and atomic filesystem replacement eventually succeed for settlement; Lean proves version ordering over arbitrary Nat updates."
     },
     "preferences": {
-      "obligation": "Normalize/validate before publication; optional clears are explicit; runtime-only flags do not overwrite other fields.",
+      "obligation": "Settings controls require a successfully loaded profile; failures retain the blocked state and retry restores saved preferences. Normalize/validate before publication; optional clears are explicit; runtime-only flags do not overwrite other fields.",
       "models": {
         "SettingsContracts": [
           "Preference",
           "NoInvalidPreferencePublication",
-          "SnapshotsDoNotPredictFuture"
+          "SnapshotsDoNotPredictFuture",
+          "RetryProfileLoad",
+          "FinishProfileLoad",
+          "ProfileRequiredForWrites",
+          "LoadedProfileRestoresSavedPreferences"
         ],
         "ProfilePersistence": [
           "LatestPendingWhenQueued"
@@ -885,14 +889,16 @@
       "implementation": [
         "src-tauri/src/commands/profile.rs",
         "src-tauri/src/commands/jev.rs",
-        "src-tauri/src/commands/audio.rs"
+        "src-tauri/src/commands/audio.rs",
+        "src/pages/SettingsPage.tsx#settingsReady"
       ],
       "evidence": [
         "src-tauri/src/commands/profile.rs",
         "src-tauri/src/commands/jev_tests.rs",
-        "src/components/settings/__tests__/P0SettingsSections.test.tsx"
+        "src/components/settings/__tests__/P0SettingsSections.test.tsx",
+        "src/pages/__tests__/SettingsPageProfileLoad.test.tsx"
       ],
-      "assumptions": "The valid/invalid abstraction is instantiated by actual validators and unit partitions; it is not a proof of every Rust string/parser branch."
+      "assumptions": "The valid/invalid abstraction is instantiated by actual validators and unit partitions; it is not a proof of every Rust string/parser branch. The UI workload uses one representative History field, two profile reads, and success/failure inputs; other command workloads start ready and retain the full field partition."
     },
     "providers": {
       "obligation": "Custom provider fields validate before mutation; removed provider references resolve to safe existing roles; every LLM/catalog request freezes provider, endpoint and auth choice, and account credentials are resolved from one session.",
@@ -998,7 +1004,7 @@
       "assumptions": "Classifier/model answers are Yes/No/Unknown inputs; linguistic quality is not proved. Screen and polish overrides are independent variables."
     },
     "assistant": {
-      "obligation": "Current task owns cancellation; old completion cannot clear it; only assistant workflow emits chat, validated sources can open.",
+      "obligation": "Current task owns cancellation; old completion cannot clear it; routed external search/screen preparation joins before dispatch; fresh screen payload uses the foreground snapshot sampled after preparation; only assistant workflow emits chat, validated sources can open.",
       "models": {
         "TaskOwnership": [
           "NewestInstalledOwnsSlot"
@@ -1007,7 +1013,10 @@
           "StartAssistantChat",
           "CancelAssistantChat",
           "AssistantNeverPastes",
-          "WebSearchConsent"
+          "WebSearchConsent",
+          "DispatchAssistant",
+          "AssistantPreparationSettlesBeforeDispatch",
+          "FreshScreenIsCurrentAtDispatch"
         ],
         "SettingsContracts": [
           "NoExecutableUrl"
@@ -1015,13 +1024,17 @@
       },
       "implementation": [
         "src-tauri/src/commands/assistant.rs",
-        "src-tauri/src/services/assistant_service.rs"
+        "src-tauri/src/services/assistant_service.rs",
+        "src-tauri/src/services/assistant_service.rs#discard_stale_screen_context"
       ],
       "evidence": [
         "src-tauri/src/commands/assistant.rs#clearing_an_old_generation_keeps_the_new_task_cancellable",
-        "src/pages/__tests__/SubtitleOverlay.test.tsx"
+        "src/pages/__tests__/SubtitleOverlay.test.tsx",
+        "src-tauri/src/services/assistant_service.rs#fresh_screen_payload_is_discarded_when_foreground_changes_during_preparation",
+        "src-tauri/src/services/assistant_service.rs#fresh_screen_payload_survives_when_recording_foreground_still_matches",
+        "src-tauri/src/services/assistant_service.rs#reused_polish_description_survives_a_later_foreground_change"
       ],
-      "assumptions": "Network response content and browser opening are trusted external outcomes; request timeout/scheduler progress is required."
+      "assumptions": "Network response content and browser opening are trusted external outcomes; request timeout/scheduler progress is required. Integrated search represents external third-party preparation; ModelNative tools run inside the LLM request. Joined preparation remains inside the cancellable assistant future. Foreground identity is sampled after preparation; OS changes after that read are not prevented. Integrated fresh screen preparation is modeled; reused pre-polish descriptions retain prior semantics and have Rust regression evidence."
     },
     "selection": {
       "obligation": "Replacement requires exact selection version, text and source window; cancellation owns latest task; raw selection is preserved.",
@@ -1067,7 +1080,7 @@
       "assumptions": "OS clipboard reads/writes and key injection may fail; success means the API acknowledged the operation, not that a foreign application consumed it."
     },
     "history": {
-      "obligation": "Persist only with consent; transactions are atomic; shared referenced/leased audio survives GC; reprocess retains captured source.",
+      "obligation": "Persist only with consent; audio writes may overlap ASR/LLM, but audio resolution and history persistence attempts settle before terminal transcription/subtitle publication and paste authorization; transactions are atomic; shared referenced/leased audio survives GC; reprocess retains captured source.",
       "models": {
         "HistoryRecords": [
           "SaveAudioGate",
@@ -1076,18 +1089,27 @@
           "DeleteTransactionIsAtomic",
           "ReprocessedRowsUseSnapshot",
           "CleanupEventually"
+        ],
+        "AppWorkflow": [
+          "SaveAudio",
+          "AudioWriteFailure",
+          "SaveHistory",
+          "HistoryWriteFailure",
+          "HistorySettlesBeforePublication"
         ]
       },
       "implementation": [
         "src-tauri/src/services/history_service.rs",
-        "src-tauri/src/commands/history.rs"
+        "src-tauri/src/commands/history.rs",
+        "src-tauri/src/services/audio_service/finalize.rs#resolve_history_audio"
       ],
       "evidence": [
         "src-tauri/src/services/history_service.rs",
         "formal/evidence/history.md",
-        "src/pages/__tests__/HistoryPage.test.tsx"
+        "src/pages/__tests__/HistoryPage.test.tsx",
+        "src-tauri/src/services/history_service.rs#latency_percentiles_match_sorted_rank_for_empty_tied_and_large_inputs"
       ],
-      "assumptions": "SQLite transactions and successful filesystem deletion are trusted primitives; five rows/audio classes and one lease; DB errors retain audio conservatively."
+      "assumptions": "SQLite transactions and successful filesystem deletion are trusted primitives; five rows/audio classes and one lease; DB errors retain audio conservatively. Finalization may publish after a failed audio/history write, but must first await its completion. Publication here means terminal transcription/subtitle results and paste authorization; assistant stream chunks and stream done arrive during LLM work and are excluded. Scheduling permits audio I/O to remain pending during LLM work; the model does not prove a wall-clock speedup."
     },
     "windows": {
       "obligation": "Only current show/hide generations publish; interactive state requires a window; exit signals capture and reaps child.",
@@ -1358,7 +1380,8 @@
       "RuntimeConfiguration.cfg"
     ],
     "SettingsContracts": [
-      "SettingsContracts.cfg"
+      "SettingsContracts.cfg",
+      "SettingsProfileLoad.cfg"
     ],
     "TaskOwnership": [
       "TaskOwnership.cfg"
@@ -1420,7 +1443,12 @@
       "EnableGpuIdle",
       "DisableGpuIdle",
       "TickGpuIdle",
-      "UnloadGpuIdle"
+      "UnloadGpuIdle",
+      "DispatchAssistant",
+      "SaveAudio",
+      "AudioWriteFailure",
+      "SaveHistory",
+      "HistoryWriteFailure"
     ],
     "MicrophoneMonitor": [
       "Begin",
@@ -1433,6 +1461,8 @@
     "SettingsContracts": [
       "KeyWrite",
       "Preference",
+      "RetryProfileLoad",
+      "FinishProfileLoad",
       "ProviderEdit",
       "RemoveProvider",
       "OpenUrl"
@@ -1455,6 +1485,46 @@
     ]
   },
   "negative": [
+    {
+      "name": "settings-write-before-profile-load",
+      "model": "SettingsContracts",
+      "config": "SettingsProfileLoadNegative.cfg",
+      "replace": [
+        "  /\\ field \\in Fields /\\ value \\in 0..2 /\\ valid \\in BOOLEAN /\\ s.edits < 2\n  /\\ s.profileState = \"Ready\"",
+        "  /\\ field \\in Fields /\\ value \\in 0..2 /\\ valid \\in BOOLEAN /\\ s.edits < 2"
+      ],
+      "invariant": "ProfileRequiredForWrites"
+    },
+    {
+      "name": "assistant-fresh-screen-after-join",
+      "model": "AppWorkflow",
+      "config": "AppWorkflowFreshScreenNegative.cfg",
+      "replace": [
+        "!.screenSent = app.screenUsed /\\ app.target = app.foreground",
+        "!.screenSent = app.screenUsed"
+      ],
+      "invariant": "FreshScreenIsCurrentAtDispatch"
+    },
+    {
+      "name": "assistant-dispatch-before-preparation",
+      "model": "AppWorkflow",
+      "config": "AppWorkflowPreparationNegative.cfg",
+      "replace": [
+        "  /\\ app.screenPrep \\in {\"Ready\", \"Unavailable\"}\n  /\\ ~app.webAllowed \\/ app.webSearch \\in {\"Sources\", \"Unavailable\"}",
+        "  /\\ TRUE"
+      ],
+      "invariant": "AssistantPreparationSettlesBeforeDispatch"
+    },
+    {
+      "name": "history-publish-before-audio-resolves",
+      "model": "AppWorkflow",
+      "config": "AppWorkflowHistoryPublicationNegative.cfg",
+      "replace": [
+        "  /\\ app.historyAllowed\n  /\\ app.audioWrite # \"Running\"\n  /\\ ~app.historyStored",
+        "  /\\ app.historyAllowed\n  /\\ ~app.historyStored"
+      ],
+      "invariant": "HistorySettlesBeforePublication"
+    },
     {
       "name": "download-ui-stale-completion",
       "model": "DownloadUiLifecycle",

@@ -437,8 +437,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
         return;
     }
 
-    let history = build_history_context(resolve_history_audio(history_audio_task).await);
-
+    // 音频归档与后续处理并行；发布最终结果前仍等待归档并尝试写入历史。
     if mode == RecordingMode::Dictation && edit_context.is_some() {
         let selected_text = edit_context.unwrap_or_default();
         let edit_started = Instant::now();
@@ -459,9 +458,12 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
         {
             Ok(outcome) => {
                 let result = outcome.text;
+                let edit_elapsed_ms = elapsed_ms(edit_started);
+                let history =
+                    build_history_context(resolve_history_audio(history_audio_task).await);
                 let timing = TranscriptionTiming {
                     asr_ms: Some(asr_elapsed_ms),
-                    polish_ms: Some(elapsed_ms(edit_started)),
+                    polish_ms: Some(edit_elapsed_ms),
                     total_ms: Some(elapsed_ms(finalize_start)),
                 };
                 history
@@ -502,6 +504,9 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
             }
             Err(e) => {
                 log::warn!("编辑选中文本失败，不替换原文: {}", e);
+                let edit_elapsed_ms = elapsed_ms(edit_started);
+                let history =
+                    build_history_context(resolve_history_audio(history_audio_task).await);
                 history
                     .persist(
                         &app_handle,
@@ -514,7 +519,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
                         None,
                         Some(TranscriptionTiming {
                             asr_ms: Some(asr_elapsed_ms),
-                            polish_ms: Some(elapsed_ms(edit_started)),
+                            polish_ms: Some(edit_elapsed_ms),
                             total_ms: Some(elapsed_ms(finalize_start)),
                         }),
                         Some(&e),
@@ -609,10 +614,13 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
         )
         .await;
         crate::commands::assistant::clear_assistant_chat_task(state.inner(), assistant_generation);
+        let assistant_elapsed_ms = elapsed_ms(assistant_started);
 
         match assistant_result {
             Ok(outcome) => {
                 let result = outcome.text;
+                let history =
+                    build_history_context(resolve_history_audio(history_audio_task).await);
                 history
                     .persist(
                         &app_handle,
@@ -625,7 +633,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
                         Some(&outcome.model),
                         Some(TranscriptionTiming {
                             asr_ms: Some(asr_elapsed_ms),
-                            polish_ms: Some(elapsed_ms(assistant_started)),
+                            polish_ms: Some(assistant_elapsed_ms),
                             total_ms: Some(elapsed_ms(finalize_start)),
                         }),
                         None,
@@ -659,6 +667,8 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
                 }
             }
             Err(err) => {
+                let history =
+                    build_history_context(resolve_history_audio(history_audio_task).await);
                 history
                     .persist(
                         &app_handle,
@@ -671,7 +681,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
                         None,
                         Some(TranscriptionTiming {
                             asr_ms: Some(asr_elapsed_ms),
-                            polish_ms: Some(elapsed_ms(assistant_started)),
+                            polish_ms: Some(assistant_elapsed_ms),
                             total_ms: Some(elapsed_ms(finalize_start)),
                         }),
                         Some(&err.to_string()),
@@ -780,6 +790,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
                 );
             }
         }
+        let history = build_history_context(resolve_history_audio(history_audio_task).await);
         let timing = TranscriptionTiming {
             asr_ms: Some(asr_elapsed_ms),
             polish_ms: polish_elapsed_ms,
