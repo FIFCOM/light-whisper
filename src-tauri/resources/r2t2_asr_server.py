@@ -144,6 +144,7 @@ class R2T2ASRServer(BaseASRServer):
         for backend in preferred:
             candidate = None
             try:
+                logger.info("R2T2 %s 后端开始加载与预热", backend)
                 backend_root = runtime_root / backend
                 candidate = NativeRuntime(
                     model_path,
@@ -171,7 +172,10 @@ class R2T2ASRServer(BaseASRServer):
                 self.backend = backend
                 self.device = backend
                 return
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "R2T2 %s 后端加载或预热失败 (%s)", backend, type(exc).__name__
+                )
                 if candidate is not None:
                     try:
                         candidate.close()
@@ -191,10 +195,12 @@ class R2T2ASRServer(BaseASRServer):
                 **self._get_gpu_device_info(),
             }
 
+        started = time.perf_counter()
+        resuming = getattr(self, "_gpu_suspended", False)
+        self.logger.info("R2T2 %s开始", "空闲恢复" if resuming else "初始化")
         if getattr(self, "native", None) is not None:
             self._close_runtime()
         self.native = None
-        self.vad_model = None
         self.segmented = None
         self.stream = None
         model_path = self._resolve_model_path()
@@ -210,7 +216,8 @@ class R2T2ASRServer(BaseASRServer):
         try:
             with self.stdout_suppressor.suppress():
                 self._load_runtime(model_path)
-                self.vad_model = FireRedVad()
+                if self.vad_model is None:
+                    self.vad_model = FireRedVad()
                 self.segmented = SegmentedR2T2(
                     self.native,
                     self.vad_model,
@@ -221,6 +228,12 @@ class R2T2ASRServer(BaseASRServer):
             self.initialized = True
             self._gpu_suspended = False
             self._last_load_error = None
+            self.logger.info(
+                "R2T2 %s完成，后端: %s，耗时 %.3f 秒",
+                "空闲恢复" if resuming else "初始化",
+                self.backend,
+                time.perf_counter() - started,
+            )
             return {
                 "success": True,
                 "message": "R2T2 初始化成功",

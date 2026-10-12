@@ -245,6 +245,49 @@ class Qwen3ASRServerTests(unittest.TestCase):
         self.assertEqual(result["speech_duration"], 0.8)
         self.assertTrue(server.check_status()["models"]["vad"])
 
+    def test_idle_resume_reuses_vad_while_reloading_native_runtime(self):
+        with (
+            mock.patch.object(
+                qwen3_asr_server.Qwen3ASRServer, "_detect_device", return_value="cuda"
+            ),
+            mock.patch.object(
+                qwen3_asr_server.Qwen3ASRServer,
+                "_resolve_model_path",
+                return_value="model.gguf",
+            ),
+            mock.patch.object(qwen3_asr_server.Qwen3ASRServer, "_warmup_inference"),
+            mock.patch.object(
+                qwen3_asr_server, "FireRedVad", side_effect=lambda: FakeVad([])
+            ) as vad_factory,
+            mock.patch.dict(
+                sys.modules, {"transcribe_cpp": types.SimpleNamespace(Model=FakeModel)}
+            ),
+        ):
+            server = qwen3_asr_server.Qwen3ASRServer(engine="qwen3-asr-0.6b")
+            self.assertTrue(server.initialize()["success"])
+            vad = server.vad_model
+            self.assertIsNotNone(vad)
+            vad_factory.assert_called_once_with()
+
+            for cycle in range(2):
+                model = server.model
+                session = server.session
+                self.assertTrue(server._suspend_gpu_runtime())
+                self.assertIs(server.vad_model, vad)
+                self.assertIsNone(server.model)
+                self.assertIsNone(server.session)
+                self.assertFalse(server.initialized)
+                self.assertTrue(server._gpu_suspended)
+
+                self.assertTrue(server.initialize()["success"])
+                self.assertTrue(server.initialized)
+                self.assertFalse(server._gpu_suspended)
+                self.assertIsNot(server.model, model)
+                self.assertIsNot(server.session, session)
+                self.assertEqual(len(FakeModel.instances), cycle + 2)
+                vad_factory.assert_called_once_with()
+                self.assertIs(server.vad_model, vad)
+
     def test_idle_unload_closes_runtime_and_keeps_vad(self):
         from gpu_idle import status_keeps_process_ready
 

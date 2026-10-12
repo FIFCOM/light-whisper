@@ -570,6 +570,53 @@ class R2T2ASRServerAdapterTests(unittest.TestCase):
         self.assertEqual(len(RecordingOfflineSegmented.instances), 1)
         self.assertEqual(RecordingOfflineSegmented.instances[0].reset_calls, 1)
 
+    def test_idle_resume_reuses_vad_while_reloading_native_runtime(self):
+        server = self._server_shell(None, initialized=False)
+        runtimes = [mock.Mock(chunk_samples=4) for _ in range(3)]
+        with (
+            mock.patch.object(server, "_resolve_model_path", return_value="model.gguf"),
+            mock.patch.object(
+                server, "_get_gpu_device_info", return_value={"device": "cuda"}
+            ),
+            mock.patch.object(
+                r2t2_asr_server, "NativeRuntime", side_effect=runtimes
+            ) as native_factory,
+            mock.patch.object(
+                r2t2_asr_server, "FireRedVad", side_effect=object
+            ) as vad_factory,
+        ):
+            self.assertTrue(server.initialize()["success"])
+            vad = server.vad_model
+            self.assertIsNotNone(vad)
+            vad_factory.assert_called_once_with()
+            self.assertIs(server.segmented.vad, vad)
+
+            for cycle in range(2):
+                native = server.native
+                segmented = server.segmented
+                stream = server.stream
+                self.assertTrue(server._suspend_gpu_runtime())
+                native.close.assert_called_once_with()
+                self.assertIs(server.vad_model, vad)
+                self.assertIsNone(server.native)
+                self.assertIsNone(server.segmented)
+                self.assertIsNone(server.stream)
+                self.assertFalse(server.initialized)
+                self.assertTrue(server._gpu_suspended)
+
+                self.assertTrue(server.initialize()["success"])
+                self.assertTrue(server.initialized)
+                self.assertFalse(server._gpu_suspended)
+                self.assertIs(server.native, runtimes[cycle + 1])
+                self.assertIsNot(server.segmented, segmented)
+                self.assertIsNot(server.stream, stream)
+                self.assertIs(server.segmented.native, server.native)
+                self.assertIs(server.stream.runtime, server.segmented)
+                self.assertEqual(native_factory.call_count, cycle + 2)
+                vad_factory.assert_called_once_with()
+                self.assertIs(server.vad_model, vad)
+                self.assertIs(server.segmented.vad, vad)
+
     def test_idle_unload_drops_native_pointers_unless_stream_is_active(self):
         from gpu_idle import status_keeps_process_ready
 

@@ -206,12 +206,14 @@ class Qwen3ASRServer(BaseASRServer):
         try:
             logger.info("加载 Qwen3-ASR: %s", model_path)
             self._load_runtime(model_path)
-            self.vad_model = FireRedVad()
+            if self.vad_model is None:
+                self.vad_model = FireRedVad()
             self._warmup_inference()
             self.initialized = True
             self._gpu_suspended = False
             self._last_load_error = None
             elapsed = time.perf_counter() - started
+            logger.info("Qwen3-ASR 初始化完成，后端: %s，耗时 %.3f 秒", self.backend, elapsed)
             return {
                 "success": True,
                 "message": f"Qwen3-ASR 初始化成功，耗时: {elapsed:.2f}秒",
