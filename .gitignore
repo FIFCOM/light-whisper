@@ -190,3 +190,13 @@ autoresearch*.tsv
 .omc/
 
 .codex/
+
+# Formal verification outputs (keep specifications and replay fixtures tracked)
+states/
+*.toolbox/
+.lake/
+*.olean
+*.ilean
+tla2tools*.jar
+formal/logs/
+formal/results/

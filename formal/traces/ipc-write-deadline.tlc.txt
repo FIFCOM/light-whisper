@@ -1,0 +1,47 @@
+Error: Invariant OneTotalDeadline is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ phase |-> "idle",
+  elapsed |-> 0,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> FALSE,
+  used |-> FALSE ]
+
+State 2: <Begin line 11, col 3 to line 13, col 29 of module IpcCommandDeadline>
+/\ lastEvent = "ipc:begin"
+/\ s = [ phase |-> "write",
+  elapsed |-> 0,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> TRUE,
+  used |-> TRUE ]
+
+State 3: <Tick line 20, col 3 to line 26, col 28 of module IpcCommandDeadline>
+/\ lastEvent = "ipc:tick"
+/\ s = [ phase |-> "write",
+  elapsed |-> 1,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> TRUE,
+  used |-> TRUE ]
+
+State 4: <Tick line 20, col 3 to line 26, col 28 of module IpcCommandDeadline>
+/\ lastEvent = "ipc:tick"
+/\ s = [ phase |-> "write",
+  elapsed |-> 2,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> TRUE,
+  used |-> TRUE ]
+
+State 5: <Tick line 20, col 3 to line 26, col 28 of module IpcCommandDeadline>
+/\ lastEvent = "ipc:tick"
+/\ s = [ phase |-> "write",
+  elapsed |-> 3,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> TRUE,
+  used |-> TRUE ]
+

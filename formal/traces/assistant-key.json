@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/AssistantCredentialOwnership.tla",
+  "config": "formal/AssistantCredentialOwnershipNegative.cfg",
+  "model_sha256": "8ab660fe56b8c29542c543cd25d23afda80daf465772363b16a0342b450d4e32",
+  "config_sha256": "4544d8deff50558af3efc6e2c61ffcff7b022d31795f78953899121b23ca9bc6",
+  "counterexample": "formal/traces/assistant-key.tlc.txt",
+  "counterexample_sha256": "9e4ae51129ff1c73410291dc93421dac08a19e91e835b2dbedfdd3721d8be0f0",
+  "violated_invariant": "CapturedProviderReceivesKey",
+  "events": [
+    "key:edit:1:deepseek",
+    "key:switch:openai",
+    "key:dispatch:1",
+    "key:write:begin:1",
+    "key:read:begin:1",
+    "key:save:success:1"
+  ]
+}

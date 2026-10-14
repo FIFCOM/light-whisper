@@ -418,6 +418,13 @@ export default function SettingsPage({
   const [assistantModel, setAssistantModel] = useState("");
   const [assistantProvider, setAssistantProviderState] = useState("");
   const [assistantApiKeyState, setAssistantApiKeyState] = useState("");
+  const assistantKeyRequestIdRef = useRef(0);
+  const assistantKeyEditIdRef = useRef(0);
+  const assistantKeyDraftsRef = useRef<Record<string, { value: string; id: number }>>({});
+  const [assistantKeySaves, setAssistantKeySaves] = useState<Record<string, {
+    id: number;
+    status: "saving" | "saved" | "error";
+  }>>({});
   // null = 用户未显式选择，effectiveOpenaiAuthMode 会根据 OAuth 登录态给出智能默认
   const [openaiAuthMode, setOpenaiAuthModeState] = useState<OpenaiAuthMode | null>(null);
   const [xaiAuthMode, setXaiAuthModeState] = useState<XaiAuthMode | null>(null);
@@ -447,6 +454,8 @@ export default function SettingsPage({
     llmProvider,
     availableProviders: availableLlmProviders,
   });
+  const assistantProviderRef = useRef(effectiveAssistantProvider);
+  assistantProviderRef.current = effectiveAssistantProvider;
   const assistantProviderToPersist = resolveAssistantProviderToPersist({
     assistantUseSeparateModel,
     assistantProvider,
@@ -561,8 +570,22 @@ export default function SettingsPage({
     return saveAiPolishApiKey(value).catch(() => {});
   }, 600, { onUnmount: "flush" });
 
-  const assistantKeySave = useDebouncedCallback((value: string) => {
-    setAssistantApiKey(value).catch(() => {});
+  const assistantKeySave = useDebouncedCallback(async (value: string, provider: string, id: number) => {
+    const updateStatus = (status: "saving" | "saved" | "error") => {
+      setAssistantKeySaves((previous) => previous[provider]?.id === id
+        ? { ...previous, [provider]: { id, status } }
+        : previous);
+    };
+    updateStatus("saving");
+    try {
+      await setAssistantApiKey(value, provider);
+      if (assistantKeyDraftsRef.current[provider]?.id === id) {
+        delete assistantKeyDraftsRef.current[provider];
+      }
+      updateStatus("saved");
+    } catch {
+      updateStatus("error");
+    }
   }, 600, { onUnmount: "flush" });
 
   const screenVisionKeySave = useDebouncedCallback((provider: string, value: string) => {
@@ -595,7 +618,7 @@ export default function SettingsPage({
   ) => {
     // openaiAuthMode 直接从闭包读最新值：useDebouncedCallback 的 timer 触发时调用最新一版 callback。
     // 一路透传到所有 schedule 调用点（保持现有 call site 签名不变）。
-    setLlmProviderConfig(
+    return setLlmProviderConfig(
       provider,
       baseUrl || undefined,
       model || undefined,
@@ -664,13 +687,18 @@ export default function SettingsPage({
     }
   }, []);
 
-  const refreshAssistantKey = useCallback(async () => {
+  const refreshAssistantKey = useCallback(async (provider = assistantProviderRef.current) => {
+    const requestId = ++assistantKeyRequestIdRef.current;
+    const draft = assistantKeyDraftsRef.current[provider];
+    setAssistantApiKeyState(draft?.value ?? "");
+    const current = () => requestId === assistantKeyRequestIdRef.current
+      && provider === assistantProviderRef.current && !draft && !assistantKeyDraftsRef.current[provider];
     try {
-      const key = (await getAssistantApiKey()) || "";
-      setAssistantApiKeyState(key);
+      const key = (await getAssistantApiKey(provider)) || "";
+      if (current()) setAssistantApiKeyState(key);
       return key;
     } catch {
-      setAssistantApiKeyState("");
+      if (current()) setAssistantApiKeyState("");
       return "";
     }
   }, []);
@@ -839,7 +867,17 @@ export default function SettingsPage({
   const refreshProfileAndKeys = useCallback(async () => {
     const loadedProfile = await refreshProfile();
     if (loadedProfile) {
-      void refreshAssistantKey();
+      const provider = resolveEffectiveAssistantProvider({
+        assistantUseSeparateModel: Boolean(loadedProfile.llm_provider.assistant_use_separate_model),
+        assistantProvider: loadedProfile.llm_provider.assistant_provider,
+        llmProvider: loadedProfile.llm_provider.active,
+        availableProviders: [
+          ...llmProviderOptions.map((option) => option.key),
+          ...(loadedProfile.llm_provider.custom_providers ?? []).map((item) => item.id),
+        ],
+      });
+      assistantProviderRef.current = provider;
+      void refreshAssistantKey(provider);
       void refreshOpenaiCodexOauthStatus();
       void refreshGrokBuildOauthStatus();
       void refreshScreenVisionKey(
@@ -1720,6 +1758,7 @@ export default function SettingsPage({
     }
 
     updateProviderDraft(llmProvider, customBaseUrl, customModel);
+    void assistantKeySave.flush();
     aiPolishKeySave.cancel();
     llmConfigSave.cancel();
     await saveAiPolishApiKey(aiPolishApiKey).catch(() => {});
@@ -1744,19 +1783,21 @@ export default function SettingsPage({
     setProviderSearch("");
     setAiModelSearch("");
     setAssistantModelSearch("");
-    await setLlmProviderConfig(
+    llmConfigSave.schedule(
       nextProvider,
-      nextDraft.baseUrl || undefined,
-      nextDraft.model || undefined,
+      nextDraft.baseUrl,
+      nextDraft.model,
       polishReasoningMode,
       assistantReasoningMode,
       assistantUseSeparateModel,
       nextAssistantModel,
       assistantProviderToPersist,
-    ).catch(() => {});
+    );
+    await llmConfigSave.flush();
     await refreshAiPolishKey();
     if (!assistantUseSeparateModel) {
-      await refreshAssistantKey();
+      assistantProviderRef.current = nextProvider;
+      await refreshAssistantKey(nextProvider);
     }
   }, [
     aiPolishApiKey,
@@ -1771,6 +1812,7 @@ export default function SettingsPage({
     assistantUseSeparateModel,
     assistantModel,
     aiPolishKeySave,
+    assistantKeySave,
     llmConfigSave,
     refreshAiPolishKey,
     refreshAssistantKey,
@@ -1807,6 +1849,7 @@ export default function SettingsPage({
   }, [aiModels, assistantModel, assistantProviderToPersist, assistantReasoningMode, assistantUseSeparateModel, customBaseUrl, llmProvider, picker, polishReasoningMode, llmConfigSave, updateProviderDraft]);
 
   const handleAssistantModelToggle = useCallback((enabled: boolean) => {
+    void assistantKeySave.flush();
     setAssistantUseSeparateModel(enabled);
     picker.close();
     const nextState = resolveAssistantModelToggleState({
@@ -1831,9 +1874,11 @@ export default function SettingsPage({
       nextState.assistantProviderToPersist,
     );
     if (enabled) {
-      void refreshAssistantKey();
+      const provider = nextState.assistantProviderToPersist || llmProvider;
+      assistantProviderRef.current = provider;
+      void refreshAssistantKey(provider);
     }
-  }, [assistantModel, assistantProvider, assistantReasoningMode, assistantUseSeparateModel, availableLlmProviders, currentAssistantPreset.defaultModel, customBaseUrl, customModel, llmProvider, picker, polishReasoningMode, refreshAssistantKey, llmConfigSave]);
+  }, [assistantKeySave, assistantModel, assistantProvider, assistantReasoningMode, assistantUseSeparateModel, availableLlmProviders, currentAssistantPreset.defaultModel, customBaseUrl, customModel, llmProvider, picker, polishReasoningMode, refreshAssistantKey, llmConfigSave]);
 
   const handleAssistantProviderSelect = useCallback(async (nextProvider: string) => {
     if (nextProvider === assistantProvider) {
@@ -1851,24 +1896,26 @@ export default function SettingsPage({
       polishModel: customModel,
       nextProviderDefaultModel,
     });
+    void assistantKeySave.flush();
     llmConfigSave.cancel();
     setAssistantProviderState(nextProvider);
     setAssistantModel(nextAssistantModel);
     picker.close();
     setAssistantProviderSearch("");
-    // 先保存 config（含新 assistantProvider），再加载对应 key
-    await setLlmProviderConfig(
+    llmConfigSave.schedule(
       llmProvider,
-      customBaseUrl || undefined,
-      customModel || undefined,
+      customBaseUrl,
+      customModel,
       polishReasoningMode,
       assistantReasoningMode,
       true,
-      nextAssistantModel || undefined,
+      nextAssistantModel,
       nextProvider,
-    ).catch(() => {});
-    await refreshAssistantKey();
-  }, [assistantProvider, assistantReasoningMode, customBaseUrl, customModel, customProviders, llmConfigSave, llmProvider, picker, polishReasoningMode, refreshAssistantKey]);
+    );
+    void llmConfigSave.flush();
+    assistantProviderRef.current = nextProvider;
+    void refreshAssistantKey(nextProvider);
+  }, [assistantKeySave, assistantProvider, assistantReasoningMode, customBaseUrl, customModel, customProviders, llmConfigSave, llmProvider, picker, polishReasoningMode, refreshAssistantKey]);
 
   const handleAssistantModelSelect = useCallback((nextModel: string) => {
     const normalizedModel = resolveModelId(nextModel, effectiveAssistantModels);
@@ -2983,16 +3030,17 @@ export default function SettingsPage({
                                         setAssistantProviderState("");
                                       }
                                       updateProviderDraft(id, baseUrl, model);
-                                      await setLlmProviderConfig(
+                                      llmConfigSave.schedule(
                                         id,
-                                        baseUrl || undefined,
-                                        model || undefined,
+                                        baseUrl,
+                                        model,
                                         polishReasoningMode,
                                         assistantReasoningMode,
                                         assistantUseSeparateModel,
                                         nextAssistantModel,
                                         assistantProviderToPersist,
-                                      ).catch(() => {});
+                                      );
+                                      await llmConfigSave.flush();
                                       await refreshAiPolishKey();
                                     });
                                   }}
@@ -3615,14 +3663,43 @@ export default function SettingsPage({
                           ariaLabelShow={t("settings.showApiKey")}
                           ariaLabelHide={t("settings.hideApiKey")}
                           onChange={(value) => {
+                            assistantKeyRequestIdRef.current += 1;
+                            const id = ++assistantKeyEditIdRef.current;
+                            assistantKeyDraftsRef.current[effectiveAssistantProvider] = { value, id };
+                            setAssistantKeySaves((previous) => ({
+                              ...previous, [effectiveAssistantProvider]: { id, status: "saving" },
+                            }));
                             setAssistantApiKeyState(value);
-                            assistantKeySave.schedule(value);
+                            assistantKeySave.schedule(value, effectiveAssistantProvider, id);
                           }}
                         />
+                        {assistantKeySaves[effectiveAssistantProvider]?.status !== "error"
+                          && assistantKeySaves[effectiveAssistantProvider] && (
+                          <span role="status" className="settings-option-desc">
+                            {t(assistantKeySaves[effectiveAssistantProvider].status === "saving"
+                              ? "settings.savingApiKey" : "settings.apiKeySaved")}
+                          </span>
+                        )}
                       </div>
                       {shouldShowGrokBuildAuth(effectiveAssistantProvider) && renderGrokBuildOauthBlock("assistant")}
                     </>
                   ) : null}
+                  {Object.entries(assistantKeySaves).filter(([, save]) => save.status === "error").map(([provider]) => (
+                    <div key={provider} className="settings-row" role="alert">
+                      <span className="settings-option-desc">
+                        {t("settings.assistantKeySaveFailed", {
+                          provider: customProviders.find((item) => item.id === provider)?.name
+                            ?? findLlmPreset(provider).label,
+                        })}
+                      </span>
+                      <button type="button" className="btn-ghost-sm" onClick={() => {
+                        const draft = assistantKeyDraftsRef.current[provider];
+                        if (!draft) return;
+                        assistantKeySave.schedule(draft.value, provider, draft.id);
+                        void assistantKeySave.flush();
+                      }}>{t("settings.retrySave")}</button>
+                    </div>
+                  ))}
 
                   {/* 助手模型选择器 */}
                   <div className="settings-row">

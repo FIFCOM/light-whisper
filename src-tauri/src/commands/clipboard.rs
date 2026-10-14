@@ -69,9 +69,25 @@ fn capture_clipboard_snapshot() -> Result<uiautomation::clipboards::Snapshot, Ap
 
 #[cfg(target_os = "windows")]
 fn send_inputs(inputs: &[INPUT]) -> Result<(), AppError> {
+    send_inputs_to_target(inputs, None)
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_paste_target(target: Option<isize>) -> Result<(), AppError> {
+    if target.is_some() && target != crate::services::selection_service::foreground_window_id() {
+        return Err(AppError::Other(
+            "粘贴目标窗口已改变，请手动恢复听写".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn send_inputs_to_target(inputs: &[INPUT], target: Option<isize>) -> Result<(), AppError> {
     const SENDINPUT_CHUNK_SIZE: usize = 128;
 
     for chunk in inputs.chunks(SENDINPUT_CHUNK_SIZE) {
+        ensure_paste_target(target)?;
         let sent = unsafe {
             SendInput(
                 chunk.len() as u32,
@@ -295,8 +311,18 @@ pub async fn paste_text_impl(
     text: &str,
     method: &str,
 ) -> Result<String, AppError> {
+    paste_text_to_target(app_handle, text, method, None).await
+}
+
+pub(crate) async fn paste_text_to_target(
+    app_handle: &tauri::AppHandle,
+    text: &str,
+    method: &str,
+    target: Option<isize>,
+) -> Result<String, AppError> {
     #[cfg(target_os = "windows")]
     {
+        ensure_paste_target(target)?;
         let use_clipboard = method == "clipboard";
 
         if use_clipboard {
@@ -332,7 +358,7 @@ pub async fn paste_text_impl(
                     make_key_input(VK_V, 0, KEYEVENTF_KEYUP),
                     make_key_input(VK_CONTROL, 0, KEYEVENTF_KEYUP),
                 ];
-                send_inputs(&inputs)
+                send_inputs_to_target(&inputs, target)
             })();
 
             if paste_result.is_ok() {
@@ -364,6 +390,7 @@ pub async fn paste_text_impl(
             // ① 释放残留修饰键
             release_stuck_modifiers()?;
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            ensure_paste_target(target)?;
 
             // ② 临时关闭前台窗口的输入法，防止 Unicode 输入被 IME 拦截
             let hwnd = unsafe { GetForegroundWindow() };
@@ -412,7 +439,7 @@ pub async fn paste_text_impl(
                 }
             }
             let send_result = if !inputs.is_empty() {
-                send_inputs(&inputs)
+                send_inputs_to_target(&inputs, target)
             } else {
                 Ok(())
             };
@@ -435,6 +462,7 @@ pub async fn paste_text_impl(
         let _ = app_handle;
         let _ = text;
         let _ = method;
+        let _ = target;
         return Err(AppError::Other(
             "当前平台暂不支持自动输入，仅 Windows 可用".to_string(),
         ));
@@ -551,7 +579,9 @@ mod tests {
 
     #[test]
     fn clipboard_mode_snapshots_before_write_and_restores_after_paste_attempt() {
-        let source = include_str!("clipboard.rs");
+        let (source, _) = include_str!("clipboard.rs")
+            .split_once("#[cfg(test)]")
+            .expect("clipboard tests should follow production code");
         let clipboard_branch_start = source
             .find("if use_clipboard")
             .expect("clipboard mode branch should exist");
@@ -569,7 +599,7 @@ mod tests {
         );
 
         let paste_attempt_pos = clipboard_branch
-            .find("send_inputs(&inputs)")
+            .find("send_inputs_to_target(&inputs, target)")
             .expect("clipboard mode must attempt Ctrl+V paste");
         let restore_guard_pos = clipboard_branch
             .find("should_restore_clipboard_after_paste")

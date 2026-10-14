@@ -151,6 +151,8 @@ pub struct RecordingSession {
     /// 录音热键触发时的前台应用快照。规则、历史元数据和截图授权都必须基于
     /// 同一个边界，避免收尾阶段切换窗口后套用错误的隐私策略。
     pub foreground_app: Option<crate::utils::foreground::ForegroundApp>,
+    /// Exact window identity captured before asynchronous recording startup.
+    pub paste_target: Option<isize>,
     /// 热键按下时并行抓取的选中文本任务。与会话同生同死，避免全局共享导致的
     /// 跨会话污染（finalize_N 读到 hotkey_{N+1} 的 grab）。
     pub edit_grab: Option<tokio::task::JoinHandle<Option<String>>>,
@@ -294,7 +296,9 @@ pub struct RecordingState {
     snapshot_revision: AtomicU64,
     pub subtitle_window_op: Mutex<()>,
     pub session_counter: AtomicU64,
-    pub pending_paste: Arc<parking_lot::Mutex<Vec<String>>>,
+    pub(crate) pending_paste:
+        Arc<parking_lot::Mutex<crate::services::audio_service::output::PendingPasteQueue>>,
+    pub(crate) paste_dispatch: Mutex<()>,
     pub selected_input_device_name: Arc<parking_lot::Mutex<Option<String>>>,
     pub microphone_level_monitor: Arc<parking_lot::Mutex<Option<MicrophoneLevelMonitor>>>,
     pub microphone_level_monitor_generation: AtomicU64,
@@ -310,6 +314,7 @@ impl Default for RecordingState {
             subtitle_window_op: Default::default(),
             session_counter: AtomicU64::new(0),
             pending_paste: Default::default(),
+            paste_dispatch: Default::default(),
             selected_input_device_name: Default::default(),
             microphone_level_monitor: Default::default(),
             microphone_level_monitor_generation: AtomicU64::new(0),
@@ -713,6 +718,7 @@ mod recording_snapshot_tests {
             native_recording: None,
             interim_cache: Arc::new(parking_lot::Mutex::new(None)),
             foreground_app: None,
+            paste_target: None,
             edit_grab: None,
         })
     }

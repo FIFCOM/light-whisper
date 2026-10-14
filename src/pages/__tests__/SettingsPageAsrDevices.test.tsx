@@ -511,8 +511,8 @@ describe("SettingsPage ASR and device settings", () => {
     const disposers = [...eventDisposers];
     const stopCallsBeforeUnmount = tauriMock.stopMicrophoneLevelMonitor.mock.calls.length;
     rendered.unmount();
-    expect(tauriMock.stopMicrophoneLevelMonitor.mock.calls.length).toBeGreaterThan(stopCallsBeforeUnmount);
     await waitFor(() => {
+      expect(tauriMock.stopMicrophoneLevelMonitor.mock.calls.length).toBeGreaterThan(stopCallsBeforeUnmount);
       for (const disposer of disposers) {
         expect(disposer).toHaveBeenCalled();
       }
@@ -533,8 +533,8 @@ describe("SettingsPage ASR and device settings", () => {
     const disposers = [...eventDisposers];
     const stopCallsBeforeUnmount = tauriMock.stopMicrophoneLevelMonitor.mock.calls.length;
     rendered.unmount();
-    expect(tauriMock.stopMicrophoneLevelMonitor.mock.calls.length).toBeGreaterThan(stopCallsBeforeUnmount);
     await waitFor(() => {
+      expect(tauriMock.stopMicrophoneLevelMonitor.mock.calls.length).toBeGreaterThan(stopCallsBeforeUnmount);
       for (const disposer of disposers) {
         expect(disposer).toHaveBeenCalled();
       }

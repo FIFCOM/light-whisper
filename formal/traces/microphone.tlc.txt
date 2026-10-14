@@ -1,0 +1,97 @@
+Error: Invariant SettledMonitorHonorsIntent is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 0,
+  usedTests |-> {},
+  pendingTests |-> {},
+  latestTest |-> 0,
+  invalidated |-> FALSE,
+  reconciled |-> FALSE,
+  generation |-> 0,
+  captured |-> 0,
+  phase |-> "idle",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+
+State 2: <Reconcile line 30, col 3 to line 32, col 33 of module MicrophoneAsyncOwnership>
+/\ lastEvent = "mic:reconcile"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 0,
+  usedTests |-> {},
+  pendingTests |-> {},
+  latestTest |-> 0,
+  invalidated |-> FALSE,
+  reconciled |-> TRUE,
+  generation |-> 1,
+  captured |-> 0,
+  phase |-> "stop",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+
+State 3: <Stop line 34, col 3 to line 37, col 36 of module MicrophoneAsyncOwnership>
+/\ lastEvent = "mic:monitor:stop"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 0,
+  usedTests |-> {},
+  pendingTests |-> {},
+  latestTest |-> 0,
+  invalidated |-> FALSE,
+  reconciled |-> TRUE,
+  generation |-> 1,
+  captured |-> 1,
+  phase |-> "start",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+
+State 4: <TestBegin line 14, col 3 to line 18, col 74 of module MicrophoneAsyncOwnership>
+/\ lastEvent = "mic:test:begin:1"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 1,
+  usedTests |-> {1},
+  pendingTests |-> {1},
+  latestTest |-> 1,
+  invalidated |-> FALSE,
+  reconciled |-> TRUE,
+  generation |-> 2,
+  captured |-> 1,
+  phase |-> "start",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+
+State 5: <StartComplete line 48, col 3 to line 52, col 46 of module MicrophoneAsyncOwnership>
+/\ lastEvent = "mic:monitor:start-complete"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 1,
+  usedTests |-> {1},
+  pendingTests |-> {1},
+  latestTest |-> 1,
+  invalidated |-> FALSE,
+  reconciled |-> TRUE,
+  generation |-> 2,
+  captured |-> 1,
+  phase |-> "settled",
+  running |-> TRUE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/MicrophoneAsyncOwnership.tla",
+  "config": "formal/MicrophoneTestOwnerNegative.cfg",
+  "model_sha256": "eda2f3b952269081f3a07cf8de1ce43b5dafbf328f0fb34be97fe378fac52e53",
+  "config_sha256": "e656bfe8530ba825023d8cb6437701b0596e967285e1320ead0c126530307739",
+  "counterexample": "formal/traces/microphone-test-owner.tlc.txt",
+  "counterexample_sha256": "beaf30b5bb00d421c5cb52a67624c1e13996fdc0ba438772fabb296310b8273a",
+  "violated_invariant": "OlderTestCannotResume",
+  "events": [
+    "mic:test:begin:1",
+    "mic:test:begin:2",
+    "mic:test:success:1"
+  ]
+}

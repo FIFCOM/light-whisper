@@ -1,0 +1,320 @@
+{
+  "schema": 1,
+  "scope": "Seven finite companion models across six async ownership/repair groups; not compiled refinement.",
+  "positive": [
+    {
+      "model": "HistoryLeaseInterleavings",
+      "config": "HistoryLeaseInterleavings.cfg",
+      "distinct": 339,
+      "source_sha256": "b44f8c239dd71605beeb6fb86254f847eef050c5bc4254295cd182c4bf3bfc20",
+      "config_sha256": "bce334c470c76f39d71405c2bfe5f58d00079b86016d898b7b974b0700e685fa",
+      "expected_violation": null
+    },
+    {
+      "model": "AssistantCredentialOwnership",
+      "config": "AssistantCredentialOwnership.cfg",
+      "distinct": 11583,
+      "source_sha256": "8ab660fe56b8c29542c543cd25d23afda80daf465772363b16a0342b450d4e32",
+      "config_sha256": "a41e2f6f8af6f107fc96bf3f02bbeef654fb88905124e31ab54d09ee04380121",
+      "expected_violation": null
+    },
+    {
+      "model": "MicrophoneAsyncOwnership",
+      "config": "MicrophoneAsyncOwnership.cfg",
+      "distinct": 1684,
+      "source_sha256": "eda2f3b952269081f3a07cf8de1ce43b5dafbf328f0fb34be97fe378fac52e53",
+      "config_sha256": "67abe1c51b31490f46eb19a968ba8d85e7c5d143c720dcce1c81c54f60a42d72",
+      "expected_violation": null
+    },
+    {
+      "model": "MicrophoneEffectOwners",
+      "config": "MicrophoneEffectOwners.cfg",
+      "distinct": 25,
+      "source_sha256": "d9b1c5ab31ae8b0bfdcf55a547d7df1da2014a02f40a1eaf75b61dd500fc64c4",
+      "config_sha256": "93d61e3104c31fa7c6e3ad7ea4d6a4496958a8e66a7152985bc50bcad32b7a4b",
+      "expected_violation": null
+    },
+    {
+      "model": "OutputDrainOwnership",
+      "config": "OutputDrainOwnership.cfg",
+      "distinct": 36,
+      "source_sha256": "b5fca3196bb4ccc00175e8fa0d17dfe77e99fac3a16b9bfd5a4a0377952cf2fc",
+      "config_sha256": "14b0130991fd470fa8a0935b1149eec8a961b92aeb235328e428b6982edd3578",
+      "expected_violation": null
+    },
+    {
+      "model": "IpcCommandDeadline",
+      "config": "IpcCommandDeadline.cfg",
+      "distinct": 21,
+      "source_sha256": "ec0251de633c07fdb6dcf6fe4519c5e5e0e8b88043ca668a0e6ad9440ea5fc29",
+      "config_sha256": "eedaaf7e0e6115fa38ae75b86f35a20e6b5cbc0d1d6fe239d0b4de5975bd0f55",
+      "expected_violation": null
+    },
+    {
+      "model": "ModelIntegrityRepair",
+      "config": "ModelIntegrityRepair.cfg",
+      "distinct": 13,
+      "source_sha256": "12008c7b17764b1d79170b047d3a8da4f0d9b21e04590221a1bf20185daf1e36",
+      "config_sha256": "a34e967c65f5476f7095e75f874749535b1337a67dd516997d6dbdd0ff236206",
+      "expected_violation": null
+    }
+  ],
+  "negative": [
+    {
+      "model": "HistoryLeaseInterleavings",
+      "config": "HistoryLeaseInterleavingsNegative.cfg",
+      "distinct": 180,
+      "source_sha256": "b44f8c239dd71605beeb6fb86254f847eef050c5bc4254295cd182c4bf3bfc20",
+      "config_sha256": "bea0b5eef50890b002451d092a03a81c62d1bd18757436b0e16f31b8821c61b0",
+      "expected_violation": "LeaseCountMatchesHolders",
+      "case": "history-leases",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "AssistantCredentialOwnership",
+      "config": "AssistantCredentialOwnershipNegative.cfg",
+      "distinct": 271,
+      "source_sha256": "8ab660fe56b8c29542c543cd25d23afda80daf465772363b16a0342b450d4e32",
+      "config_sha256": "4544d8deff50558af3efc6e2c61ffcff7b022d31795f78953899121b23ca9bc6",
+      "expected_violation": "CapturedProviderReceivesKey",
+      "case": "assistant-key",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "AssistantCredentialOwnership",
+      "config": "AssistantCredentialReadNegative.cfg",
+      "distinct": 130,
+      "source_sha256": "8ab660fe56b8c29542c543cd25d23afda80daf465772363b16a0342b450d4e32",
+      "config_sha256": "f7c09f35cea109b2be65e63d4d006d596e6162b0ca62d5ce52f7569f0a20cb79",
+      "expected_violation": "OnlyLatestReadPublishes",
+      "case": "assistant-read",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "AssistantCredentialOwnership",
+      "config": "AssistantCredentialSavedReadNegative.cfg",
+      "distinct": 1603,
+      "source_sha256": "8ab660fe56b8c29542c543cd25d23afda80daf465772363b16a0342b450d4e32",
+      "config_sha256": "d7e5e71031b724492c84bc67e5d8224d7f695228372d69513cde0464f1b957bc",
+      "expected_violation": "OnlyLatestReadPublishes",
+      "case": "assistant-saved-read",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "MicrophoneAsyncOwnership",
+      "config": "MicrophoneAsyncOwnershipNegative.cfg",
+      "distinct": 71,
+      "source_sha256": "eda2f3b952269081f3a07cf8de1ce43b5dafbf328f0fb34be97fe378fac52e53",
+      "config_sha256": "3ceaea84d80065c71b7fb880623e17b33718737b9901330a65a915e974aaee17",
+      "expected_violation": "SettledMonitorHonorsIntent",
+      "case": "microphone",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "MicrophoneAsyncOwnership",
+      "config": "MicrophoneTestOwnerNegative.cfg",
+      "distinct": 114,
+      "source_sha256": "eda2f3b952269081f3a07cf8de1ce43b5dafbf328f0fb34be97fe378fac52e53",
+      "config_sha256": "e656bfe8530ba825023d8cb6437701b0596e967285e1320ead0c126530307739",
+      "expected_violation": "OlderTestCannotResume",
+      "case": "microphone-test-owner",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "MicrophoneEffectOwners",
+      "config": "MicrophoneEffectOwnersNegative.cfg",
+      "distinct": 13,
+      "source_sha256": "d9b1c5ab31ae8b0bfdcf55a547d7df1da2014a02f40a1eaf75b61dd500fc64c4",
+      "config_sha256": "fd53eaf6d19de917b8eb94211aa3ce6d717c3fdb403cee0035f06b795f51e219",
+      "expected_violation": "RetiredEffectCannotStopReplacement",
+      "case": "microphone-effect-owner",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "MicrophoneEffectOwners",
+      "config": "MicrophoneRetiredTestNegative.cfg",
+      "distinct": 10,
+      "source_sha256": "d9b1c5ab31ae8b0bfdcf55a547d7df1da2014a02f40a1eaf75b61dd500fc64c4",
+      "config_sha256": "355bc248005b72d6ce3e424ad11c98babc84a1082b1b6afb765cd2f7ccaf70f1",
+      "expected_violation": "RetiredEffectCannotStopReplacement",
+      "case": "microphone-retired-test",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "OutputDrainOwnership",
+      "config": "OutputDrainOwnershipNegative.cfg",
+      "distinct": 23,
+      "source_sha256": "b5fca3196bb4ccc00175e8fa0d17dfe77e99fac3a16b9bfd5a4a0377952cf2fc",
+      "config_sha256": "c0c7aa37eef581d3fdd8369910f92ba6582ea8d8a7bba296d458df0c442f12af",
+      "expected_violation": "IdlePendingHasScheduledDrain",
+      "case": "output-drain",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "OutputDrainOwnership",
+      "config": "OutputSuccessDrainNegative.cfg",
+      "distinct": 35,
+      "source_sha256": "b5fca3196bb4ccc00175e8fa0d17dfe77e99fac3a16b9bfd5a4a0377952cf2fc",
+      "config_sha256": "719a04b8215893f6c02c29d5cefe6034a9732e2a01b0845555f5631f04ae788b",
+      "expected_violation": "IdlePendingHasScheduledDrain",
+      "case": "output-success",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "OutputDrainOwnership",
+      "config": "OutputStartErrorNegative.cfg",
+      "distinct": 32,
+      "source_sha256": "b5fca3196bb4ccc00175e8fa0d17dfe77e99fac3a16b9bfd5a4a0377952cf2fc",
+      "config_sha256": "5127e3b4cac4cef06450b13618462212c3e726a34e86479d37a3ee8ead93a73d",
+      "expected_violation": "IdlePendingHasScheduledDrain",
+      "case": "output-start-error",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "OutputDrainOwnership",
+      "config": "OutputTargetOwnershipNegative.cfg",
+      "distinct": 36,
+      "source_sha256": "b5fca3196bb4ccc00175e8fa0d17dfe77e99fac3a16b9bfd5a4a0377952cf2fc",
+      "config_sha256": "bfaf51bc9f6fc3decce05a08afe53a5bf35dc536a2b7d3871dc876b8b5c846e2",
+      "expected_violation": "ChangedTargetNeverBlindPastes",
+      "case": "output-target",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "IpcCommandDeadline",
+      "config": "IpcCommandDeadlineNegative.cfg",
+      "distinct": 26,
+      "source_sha256": "ec0251de633c07fdb6dcf6fe4519c5e5e0e8b88043ca668a0e6ad9440ea5fc29",
+      "config_sha256": "e50d38d3914dc99e2447a5489538f31d0143fc2d24a50c7286e812c01222e9d1",
+      "expected_violation": "OneTotalDeadline",
+      "case": "ipc-deadline",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "IpcCommandDeadline",
+      "config": "IpcWriteDeadlineNegative.cfg",
+      "distinct": 22,
+      "source_sha256": "ec0251de633c07fdb6dcf6fe4519c5e5e0e8b88043ca668a0e6ad9440ea5fc29",
+      "config_sha256": "c7d21e011f18c428f99427a0b151cb35890c1c09c3a6d934f9524dec8697676d",
+      "expected_violation": "OneTotalDeadline",
+      "case": "ipc-write-deadline",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "IpcCommandDeadline",
+      "config": "IpcCancellationNegative.cfg",
+      "distinct": 12,
+      "source_sha256": "ec0251de633c07fdb6dcf6fe4519c5e5e0e8b88043ca668a0e6ad9440ea5fc29",
+      "config_sha256": "01dd719e124120c7f4c370655f11b0b8816d3a3f8ced5931983a950cae013f66",
+      "expected_violation": "InvalidFrameCannotBeReused",
+      "case": "ipc-cancel",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "ModelIntegrityRepair",
+      "config": "ModelIntegrityRepairNegative.cfg",
+      "distinct": 12,
+      "source_sha256": "12008c7b17764b1d79170b047d3a8da4f0d9b21e04590221a1bf20185daf1e36",
+      "config_sha256": "d626b84e38342db6020cb306d13f6fd9d959a892bf23a993d93a5566bc8e92af",
+      "expected_violation": "CorruptAlwaysOffersRepair",
+      "case": "model-integrity",
+      "validated_java_exit": 12,
+      "kind": "wrong configuration"
+    },
+    {
+      "model": "ModelIntegrityRepair",
+      "config": "ModelIntegrityRepairTrace.cfg",
+      "distinct": 6,
+      "source_sha256": "12008c7b17764b1d79170b047d3a8da4f0d9b21e04590221a1bf20185daf1e36",
+      "config_sha256": "cafdbddc03eb9b19575ef888267e346686eae1d9d8bc0d6a9db75d4a98e4969c",
+      "expected_violation": "RepairPathNotReached",
+      "case": "model-repair",
+      "validated_java_exit": 12,
+      "kind": "positive reachability witness"
+    }
+  ],
+  "generated_traces": 17,
+  "generated_events": 81,
+  "wrong_configurations": 16,
+  "positive_reachability_witnesses": 1,
+  "implementation_mutations": [
+    {
+      "case": "assistant-saved-read",
+      "source": "src/pages/SettingsPage.tsx",
+      "baseline_sha256": "2855cf84929170955fad766bd94ffe9dd092b3408e6b53b44ece38dbb40a2b0b",
+      "wrong_sha256": "e1414ec0f2d27f772143c65eea6fbff6623e2b44ad3a148009be10d58f51d311",
+      "baseline_exit": 0,
+      "wrong_exit": 1,
+      "test": "replays a read captured while dirty after the matching save clears its draft",
+      "failed_assertions": 1,
+      "scratch_subdirectory": "mutation-assistant-saved-read-20261014T160008622305"
+    },
+    {
+      "case": "assistant-read",
+      "source": "src/pages/SettingsPage.tsx",
+      "baseline_sha256": "2855cf84929170955fad766bd94ffe9dd092b3408e6b53b44ece38dbb40a2b0b",
+      "wrong_sha256": "525ac04a52315ce5ea21881f2dbf40f5023c6f037b0e86289a4856b18ccb54d2",
+      "baseline_exit": 0,
+      "wrong_exit": 1,
+      "test": "replays a stale provider read outcome",
+      "failed_assertions": 1,
+      "scratch_subdirectory": "mutation-assistant-read-20261014T160008622305"
+    },
+    {
+      "case": "microphone-retired-test",
+      "source": "src/hooks/useMicrophoneSettings.ts",
+      "baseline_sha256": "876a303fa4356355814bb6ee519ed88bd4f512385c81e678558f86e4a0b28065",
+      "wrong_sha256": "9957d9bbad964bca7610f0e7d24d78a59db545f3933126a33f1919ccad12f26b",
+      "baseline_exit": 0,
+      "wrong_exit": 1,
+      "test": "replays microphone-retired-test through two hook instances",
+      "failed_assertions": 1,
+      "scratch_subdirectory": "mutation-microphone-retired-test-20261014T160008622305"
+    },
+    {
+      "case": "microphone-effect-owner",
+      "source": "src/hooks/useMicrophoneSettings.ts",
+      "baseline_sha256": "876a303fa4356355814bb6ee519ed88bd4f512385c81e678558f86e4a0b28065",
+      "wrong_sha256": "4dfdaefa26a0b98e7980d9b6035b938eb2d44eaedd076b595efd05d887817fdc",
+      "baseline_exit": 0,
+      "wrong_exit": 1,
+      "test": "replays microphone-effect-owner through two hook instances",
+      "failed_assertions": 1,
+      "scratch_subdirectory": "mutation-microphone-effect-owner-20261014T160008622305"
+    }
+  ],
+  "checks": {
+    "inventory": "124 commands, 17 event families, 16 lifecycle contracts, 11 protocols",
+    "new_positive_action_property_bindings": "7 models passed",
+    "provenance_regressions": "8 passed, including LF byte and actual git-attribute checks; before fix 34 semantic CRLF failures, zero fixture errors",
+    "existing_verifier_regressions": "11 passed",
+    "output_source_wiring": "3 passed; startup-error case previously semantic RED",
+    "frontend_generated_replay": "7 passed, 54 unrelated tests skipped",
+    "native_generated_replay": "6 passed, 1 child fixture ignored; rerun compiled test binary against final LF traces, 2.36s",
+    "cache_integrity_and_explicit_repair_replay": "1 passed with two generated schedules",
+    "isolated_source_mutations": "4 corrected baselines passed; 4 wrong variants failed exactly one selected assertion each",
+    "checkout_portability": "Exactly 48 new hashed inputs use LF: 7 TLA modules, 24 configs, 17 raw counterexamples; actual git attributes text=set and eol=lf"
+  },
+  "assumptions": [
+    "History lease companion releases after source row removal; equality outside atomic SQL transaction.",
+    "Output deduplication covers pending session IDs, with one finalizer per unique production session; no global exactly-once ledger.",
+    "Native primitive injection and source scheduling guards do not prove foreign app consumption or Windows end-to-end behavior.",
+    "Initial credential hydration outside companion model; each provider switch captures its read before subsequent edit or save-clear microsteps.",
+    "RepairPathNotReached generates a positive path witness and is not a safety negative or property proof."
+  ]
+}

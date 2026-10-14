@@ -182,6 +182,11 @@ def main() -> int:
     args = parser.parse_args()
     manifest = json.loads((ROOT / "formal/verification.json").read_text(encoding="utf-8"))
     check_inventory(manifest)
+    traces = subprocess.run([sys.executable, "scripts/generate_async_ownership_traces.py", "--check"],
+                            cwd=ROOT, text=True, capture_output=True, timeout=30)
+    if traces.returncode:
+        raise ValueError(traces.stdout + traces.stderr)
+    print(traces.stdout.strip(), flush=True)
     snapshot = subprocess.run([sys.executable, "scripts/check_request_snapshot.py"], cwd=ROOT,
                               text=True, capture_output=True, timeout=30)
     if snapshot.returncode:

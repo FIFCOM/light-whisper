@@ -1,0 +1,78 @@
+Error: Invariant OlderTestCannotResume is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 0,
+  usedTests |-> {},
+  pendingTests |-> {},
+  latestTest |-> 0,
+  invalidated |-> FALSE,
+  reconciled |-> FALSE,
+  generation |-> 0,
+  captured |-> 0,
+  phase |-> "idle",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+
+State 2: <TestBegin line 14, col 3 to line 18, col 74 of module MicrophoneAsyncOwnership>
+/\ lastEvent = "mic:test:begin:1"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 1,
+  usedTests |-> {1},
+  pendingTests |-> {1},
+  latestTest |-> 1,
+  invalidated |-> FALSE,
+  reconciled |-> FALSE,
+  generation |-> 1,
+  captured |-> 0,
+  phase |-> "stop",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+
+State 3: <TestBegin line 14, col 3 to line 18, col 74 of module MicrophoneAsyncOwnership>
+/\ lastEvent = "mic:test:begin:2"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 2,
+  usedTests |-> {1, 2},
+  pendingTests |-> {1, 2},
+  latestTest |-> 2,
+  invalidated |-> FALSE,
+  reconciled |-> FALSE,
+  generation |-> 2,
+  captured |-> 0,
+  phase |-> "stop",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> FALSE ]
+
+State 4: <TestComplete line 20, col 3 to line 28, col 74 of module MicrophoneAsyncOwnership>
+/\ lastEvent = "mic:test:success:1"
+/\ s = [ mounted |-> TRUE,
+  active |-> TRUE,
+  enabled |-> TRUE,
+  recording |-> FALSE,
+  currentTest |-> 0,
+  usedTests |-> {1, 2},
+  pendingTests |-> {2},
+  latestTest |-> 2,
+  invalidated |-> FALSE,
+  reconciled |-> FALSE,
+  generation |-> 3,
+  captured |-> 0,
+  phase |-> "stop",
+  running |-> FALSE,
+  ready |-> FALSE,
+  staleResume |-> TRUE ]
+

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/MicrophoneAsyncOwnership.tla",
+  "config": "formal/MicrophoneAsyncOwnershipNegative.cfg",
+  "model_sha256": "eda2f3b952269081f3a07cf8de1ce43b5dafbf328f0fb34be97fe378fac52e53",
+  "config_sha256": "3ceaea84d80065c71b7fb880623e17b33718737b9901330a65a915e974aaee17",
+  "counterexample": "formal/traces/microphone.tlc.txt",
+  "counterexample_sha256": "0699b509307b0a1e4a02fc862947f56460d36e389bc4c03a846abafbbd1fe883",
+  "violated_invariant": "SettledMonitorHonorsIntent",
+  "events": [
+    "mic:reconcile",
+    "mic:monitor:stop",
+    "mic:test:begin:1",
+    "mic:monitor:start-complete"
+  ]
+}

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import i18n from "@/i18n";
+import type { FunASRStatus } from "@/types";
 import {
   cancelModelDownload,
   checkFunASRStatus,
@@ -11,6 +12,7 @@ import {
 export type ModelStage =
   | "checking"
   | "need_download"
+  | "need_repair"
   | "downloading"
   | "loading"
   | "ready"
@@ -165,6 +167,18 @@ export function useModelStatus(): UseModelStatusReturn {
     clearPolling();
   }, [clearPolling]);
 
+  const enterNeedRepairState = useCallback(() => {
+    invalidateDownload();
+    clearDownloadWatchdog();
+    clearPolling();
+    setDownloadingState(false);
+    restartAttemptedRef.current = false;
+    loadingChecksRef.current = 0;
+    setStage("need_repair");
+    setError(null);
+    setDownloadMessage(null);
+  }, [clearDownloadWatchdog, clearPolling, invalidateDownload, setDownloadingState]);
+
   const startDownloadWatchdog = useCallback(() => {
     clearDownloadWatchdog();
     downloadWatchdogRef.current = setTimeout(() => {
@@ -194,6 +208,17 @@ export function useModelStatus(): UseModelStatusReturn {
 
       applyStatusSnapshot(status);
 
+      if (status.model_state === "corrupt") {
+        enterNeedRepairState();
+        return;
+      }
+
+      if (status.model_state === "missing"
+        || (!status.model_state && status.models_present === false)) {
+        enterNeedDownloadState();
+        return;
+      }
+
       if (status.running && status.ready) {
         startFailuresRef.current = 0;
         autoDownloadRetryRef.current = 0;
@@ -203,11 +228,6 @@ export function useModelStatus(): UseModelStatusReturn {
         setError(null);
         setDownloadMessage(null);
         clearPolling();
-        return;
-      }
-
-      if (status.models_present === false) {
-        enterNeedDownloadState();
         return;
       }
 
@@ -256,7 +276,7 @@ export function useModelStatus(): UseModelStatusReturn {
       if (!current()) return;
       enterErrorState(toErrorMessage(err, i18n.t("model.checkStatusFailed")));
     }
-  }, [applyStatusSnapshot, clearPolling, enterErrorState, enterNeedDownloadState]);
+  }, [applyStatusSnapshot, clearPolling, enterErrorState, enterNeedDownloadState, enterNeedRepairState]);
 
   const startPolling = useCallback(() => {
     if (intervalRef.current !== null) return;
@@ -290,9 +310,7 @@ export function useModelStatus(): UseModelStatusReturn {
       message?: string;
       device?: string | null;
       gpu_name?: string | null;
-      models_present?: boolean;
-      missing_models?: string[];
-    };
+    } & Pick<FunASRStatus, "models_present" | "missing_models" | "model_state" | "corrupt_models">;
 
     const setup = async () => {
       unlisten = await listen<FunasrStatusPayload>(
@@ -301,6 +319,15 @@ export function useModelStatus(): UseModelStatusReturn {
           if (disposed || !mountedRef.current) return;
           const { status, message } = event.payload;
           applyStatusSnapshot(event.payload);
+
+          if (event.payload.model_state === "corrupt") {
+            enterNeedRepairState();
+            return;
+          }
+          if (event.payload.model_state === "missing") {
+            enterNeedDownloadState();
+            return;
+          }
 
           if (status === "ready") {
             setStage("ready");
@@ -314,7 +341,7 @@ export function useModelStatus(): UseModelStatusReturn {
             setStage("loading");
             setDownloadMessage(message ?? null);
           } else if (status === "error") {
-            if (message?.includes("模型文件未下载")) {
+            if (!event.payload.model_state && message?.includes("模型文件未下载")) {
               enterNeedDownloadState();
               return;
             }
@@ -341,7 +368,7 @@ export function useModelStatus(): UseModelStatusReturn {
       disposed = true;
       unlisten?.();
     };
-  }, [applyStatusSnapshot, checkStatus, clearPolling, enterErrorState, enterNeedDownloadState, startPolling]);
+  }, [applyStatusSnapshot, checkStatus, clearPolling, enterErrorState, enterNeedDownloadState, enterNeedRepairState, startPolling]);
 
   useEffect(() => {
     let disposed = false;

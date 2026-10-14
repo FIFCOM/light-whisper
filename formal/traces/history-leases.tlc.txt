@@ -1,0 +1,90 @@
+Error: Invariant LeaseCountMatchesHolders is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ holder |-> <<"None", "None">>,
+  used |-> {},
+  count |-> [A |-> 0, B |-> 0],
+  rows |-> {"A", "B"},
+  files |-> {"A", "B"},
+  transaction |-> 0,
+  audio |-> "A",
+  phase |-> "idle" ]
+
+State 2: <Acquire line 15, col 3 to line 17, col 72 of module HistoryLeaseInterleavings>
+/\ lastEvent = "acquire:1:A"
+/\ s = [ holder |-> <<"A", "None">>,
+  used |-> {1},
+  count |-> [A |-> 1, B |-> 0],
+  rows |-> {"A", "B"},
+  files |-> {"A", "B"},
+  transaction |-> 0,
+  audio |-> "A",
+  phase |-> "idle" ]
+
+State 3: <Acquire line 15, col 3 to line 17, col 72 of module HistoryLeaseInterleavings>
+/\ lastEvent = "acquire:2:A"
+/\ s = [ holder |-> <<"A", "A">>,
+  used |-> {1, 2},
+  count |-> [A |-> 2, B |-> 0],
+  rows |-> {"A", "B"},
+  files |-> {"A", "B"},
+  transaction |-> 0,
+  audio |-> "A",
+  phase |-> "idle" ]
+
+State 4: <Remove line 19, col 3 to line 21, col 32 of module HistoryLeaseInterleavings>
+/\ lastEvent = "delete:A"
+/\ s = [ holder |-> <<"A", "A">>,
+  used |-> {1, 2},
+  count |-> [A |-> 2, B |-> 0],
+  rows |-> {"B"},
+  files |-> {"A", "B"},
+  transaction |-> 0,
+  audio |-> "A",
+  phase |-> "idle" ]
+
+State 5: <BeginRelease line 23, col 3 to line 25, col 72 of module HistoryLeaseInterleavings>
+/\ lastEvent = "release:begin:2"
+/\ s = [ holder |-> <<"A", "A">>,
+  used |-> {1, 2},
+  count |-> [A |-> 2, B |-> 0],
+  rows |-> {"B"},
+  files |-> {"A", "B"},
+  transaction |-> 2,
+  audio |-> "A",
+  phase |-> "delete-one" ]
+
+State 6: <DeleteOne line 27, col 3 to line 31, col 38 of module HistoryLeaseInterleavings>
+/\ lastEvent = "release:delete-one"
+/\ s = [ holder |-> <<"A", "A">>,
+  used |-> {1, 2},
+  count |-> [A |-> 1, B |-> 0],
+  rows |-> {"B"},
+  files |-> {"A", "B"},
+  transaction |-> 2,
+  audio |-> "A",
+  phase |-> "decrement-many" ]
+
+State 7: <DecrementMany line 33, col 3 to line 37, col 42 of module HistoryLeaseInterleavings>
+/\ lastEvent = "release:decrement-many"
+/\ s = [ holder |-> <<"A", "A">>,
+  used |-> {1, 2},
+  count |-> [A |-> 0, B |-> 0],
+  rows |-> {"B"},
+  files |-> {"A", "B"},
+  transaction |-> 2,
+  audio |-> "A",
+  phase |-> "commit" ]
+
+State 8: <CommitRelease line 39, col 3 to line 41, col 34 of module HistoryLeaseInterleavings>
+/\ lastEvent = "release:commit"
+/\ s = [ holder |-> <<"A", "None">>,
+  used |-> {1, 2},
+  count |-> [A |-> 0, B |-> 0],
+  rows |-> {"B"},
+  files |-> {"A", "B"},
+  transaction |-> 0,
+  audio |-> "A",
+  phase |-> "idle" ]
+

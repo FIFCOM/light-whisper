@@ -28,7 +28,7 @@ fn ipc_test_server() {
             windows_sys::Win32::Foundation::CloseHandle(std::io::stdout().as_raw_handle());
         }
     }
-    if mode.starts_with("closed_") {
+    if mode.starts_with("closed_") || mode == "parked_stdin" {
         loop {
             std::thread::park();
         }
@@ -150,4 +150,266 @@ async fn application_error_keeps_the_healthy_ipc_server() {
     assert!(state.is_funasr_ready());
     assert!(state.engine.funasr_process.lock().await.is_some());
     assert_eq!(state.inline_audio_transport(), Some(true));
+}
+
+fn pipe_filling_command() -> ServerCommand {
+    ServerCommand::StreamFeed {
+        session_id: 1,
+        offset: 0,
+        // The Windows anonymous pipe cannot buffer this payload while its
+        // live peer parks without ever reading stdin.
+        audio_base64: "A".repeat(8 * 1024 * 1024),
+        audio_format: "pcm_f32le".to_string(),
+        sample_rate: 16_000,
+    }
+}
+
+#[tokio::test]
+async fn blocked_stdin_obeys_command_deadline_and_allows_a_fresh_server() {
+    let app = tauri::test::mock_app();
+    let state = AppState::default();
+    *state.engine.funasr_process.lock().await = Some(test_process("parked_stdin").await);
+    state.set_funasr_ready(true);
+    state.set_inline_audio_transport(Some(true));
+    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let received = events.clone();
+    let listener = app.listen("funasr-status", move |event| {
+        received
+            .lock()
+            .push(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+    });
+    let command = pipe_filling_command();
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        super::send_command_to_server_with_timeout(
+            &state,
+            &command,
+            Some(app.handle()),
+            Duration::from_millis(100),
+        ),
+    )
+    .await
+    .expect("the production command deadline must cover a blocked stdin write")
+    .expect_err("a server that never reads stdin must time out");
+
+    assert!(!state.is_funasr_ready());
+    assert_eq!(state.inline_audio_transport(), None);
+    assert!(state.engine.funasr_process.lock().await.is_none());
+    assert_eq!(events.lock().len(), 1);
+    assert_eq!(events.lock()[0]["status"], "crashed");
+    app.unlisten(listener);
+
+    *state.engine.funasr_process.lock().await = Some(test_process("healthy").await);
+    state.set_funasr_ready(true);
+    let response = send_command_to_server(&state, &ServerCommand::Status, Some(app.handle()))
+        .await
+        .expect("a fresh server must acquire the released IPC lock");
+    assert_eq!(response.success, Some(true));
+    assert!(state.is_funasr_ready());
+}
+
+#[tokio::test]
+async fn cancelled_partial_stdin_write_invalidates_the_owned_server() {
+    let app = tauri::test::mock_app();
+    let state = AppState::default();
+    *state.engine.funasr_process.lock().await = Some(test_process("parked_stdin").await);
+    state.set_funasr_ready(true);
+    state.set_inline_audio_transport(Some(true));
+    let command = pipe_filling_command();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(150),
+            send_command_to_server(&state, &command, Some(app.handle())),
+        )
+        .await
+        .is_err(),
+        "the large command must remain pending against a non-reading peer"
+    );
+
+    let process = tokio::time::timeout(Duration::from_secs(1), state.engine.funasr_process.lock())
+        .await
+        .expect("cancellation must release the IPC lock");
+    assert!(
+        process.is_none(),
+        "a partially written JSON frame cannot be reused after cancellation"
+    );
+    drop(process);
+    assert!(!state.is_funasr_ready());
+    assert_eq!(state.inline_audio_transport(), None);
+
+    *state.engine.funasr_process.lock().await = Some(test_process("healthy").await);
+    state.set_funasr_ready(true);
+    assert_eq!(
+        send_command_to_server(&state, &ServerCommand::Status, Some(app.handle()))
+            .await
+            .unwrap()
+            .success,
+        Some(true)
+    );
+}
+
+// Formal replay ownership: separate append-only test module.
+mod async_ownership_replay_tests {
+    use super::*;
+    mod trace {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-support/async_ownership_trace.rs"
+        ));
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture, invoked by TLC IPC replay"]
+    fn ipc_trace_server() {
+        let Ok(gate) = std::env::var("LIGHT_WHISPER_IPC_TRACE_GATE") else {
+            return;
+        };
+        println!("{{\"test_ready\":true}}");
+        std::io::stdout().flush().unwrap();
+        while !std::path::Path::new(&gate).exists() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).unwrap();
+        serde_json::from_str::<serde_json::Value>(&line).unwrap();
+        std::fs::write(format!("{gate}.consumed"), b"consumed").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[tokio::test]
+    async fn tlc_ipc_deadline_replays_write_progress_without_restarting_the_budget() {
+        for name in ["ipc-deadline", "ipc-write-deadline", "ipc-cancel"] {
+            replay_ipc_schedule(name).await;
+        }
+    }
+
+    async fn replay_ipc_schedule(name: &str) {
+        let events = trace::load(name);
+        let gate = std::env::temp_dir().join(format!(
+            "light-whisper-ipc-trace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let consumed = std::path::PathBuf::from(format!("{}.consumed", gate.display()));
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "services::funasr_service::ipc_recovery_tests::async_ownership_replay_tests::ipc_trace_server", "--ignored", "--nocapture"])
+            .env("LIGHT_WHISPER_IPC_TRACE_GATE", &gate)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .creation_flags(0x08000000).kill_on_drop(true).spawn().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let mut line = String::new();
+                assert_ne!(stdout.read_line(&mut line).await.unwrap(), 0);
+                if line.contains("\"test_ready\":true") {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let app = tauri::test::mock_app();
+        let state = AppState::default();
+        *state.engine.funasr_process.lock().await = Some(FunasrProcess {
+            child,
+            stdin,
+            stdout,
+        });
+        state.set_funasr_ready(true);
+        state.set_inline_audio_transport(Some(true));
+        let command = pipe_filling_command();
+        let mut operation = Some(Box::pin(super::super::send_command_to_server_with_timeout(
+            &state,
+            &command,
+            Some(app.handle()),
+            Duration::from_secs(1),
+        )));
+        let started = tokio::time::Instant::now();
+        let mut ticks = 0;
+        let mut handled = 0;
+        let total_ticks = events
+            .iter()
+            .filter(|event| event.as_str() == "ipc:tick")
+            .count();
+        for event in &events {
+            match event.as_str() {
+                "ipc:begin" => {
+                    assert!(tokio::time::timeout(
+                        Duration::from_millis(5),
+                        operation.as_mut().unwrap().as_mut()
+                    )
+                    .await
+                    .is_err());
+                }
+                "ipc:write:complete" => {
+                    std::fs::write(&gate, b"read").unwrap();
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while !consumed.exists() {
+                            tokio::select! {
+                                result = operation.as_mut().unwrap().as_mut() => panic!("command settled before write consumed: {}", result.is_ok()),
+                                _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                            }
+                        }
+                    }).await.expect("child must consume the actual JSON frame");
+                }
+                "ipc:flush:complete" => {
+                    assert!(consumed.exists());
+                }
+                "ipc:tick" => {
+                    ticks += 1;
+                    if ticks == total_ticks {
+                        tokio::time::timeout(
+                            Duration::from_secs(1).saturating_sub(started.elapsed())
+                                + Duration::from_millis(150),
+                            operation.as_mut().unwrap().as_mut(),
+                        )
+                        .await
+                        .expect(
+                            "the original total command deadline must expire after write progress",
+                        )
+                        .expect_err("a server with no reply must time out");
+                    } else {
+                        assert!(tokio::time::timeout(
+                            if ticks == 1 {
+                                Duration::from_millis(400)
+                            } else {
+                                Duration::from_millis(5)
+                            },
+                            operation.as_mut().unwrap().as_mut()
+                        )
+                        .await
+                        .is_err());
+                    }
+                }
+                "ipc:cancel" => {
+                    drop(operation.take());
+                }
+                _ => panic!("unmapped TLC IPC event: {event}"),
+            }
+            handled += 1;
+        }
+        drop(operation);
+        assert_eq!(handled, events.len());
+        assert!(!state.is_funasr_ready());
+        assert_eq!(state.inline_audio_transport(), None);
+        assert!(state.engine.funasr_process.lock().await.is_none());
+        *state.engine.funasr_process.lock().await = Some(test_process("healthy").await);
+        state.set_funasr_ready(true);
+        assert_eq!(
+            send_command_to_server(&state, &ServerCommand::Status, Some(app.handle()))
+                .await
+                .unwrap()
+                .success,
+            Some(true)
+        );
+        let _ = std::fs::remove_file(gate);
+        let _ = std::fs::remove_file(consumed);
+    }
 }

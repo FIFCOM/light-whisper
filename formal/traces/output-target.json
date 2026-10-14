@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/OutputDrainOwnership.tla",
+  "config": "formal/OutputTargetOwnershipNegative.cfg",
+  "model_sha256": "b5fca3196bb4ccc00175e8fa0d17dfe77e99fac3a16b9bfd5a4a0377952cf2fc",
+  "config_sha256": "bfaf51bc9f6fc3decce05a08afe53a5bf35dc536a2b7d3871dc876b8b5c846e2",
+  "counterexample": "formal/traces/output-target.tlc.txt",
+  "counterexample_sha256": "9440cdad7ea1d73620d96cedcda21d86eee1c8776aff7503aebe19c516ee1780",
+  "violated_invariant": "ChangedTargetNeverBlindPastes",
+  "events": [
+    "output:B:start",
+    "output:A:complete",
+    "output:target:changed",
+    "output:B:exit:cancel",
+    "output:drain"
+  ]
+}

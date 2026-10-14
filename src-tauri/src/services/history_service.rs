@@ -502,16 +502,16 @@ fn release_audio_lease_with_connection(
         .map_err(|error| format!("开始释放历史音频租约事务失败: {error}"))?;
     transaction
         .execute(
-            "UPDATE history_audio_leases SET lease_count = lease_count - 1, updated_at = ?2 WHERE audio_file = ?1 AND lease_count > 1",
-            params![audio_file, now_millis()],
-        )
-        .map_err(|error| format!("递减历史音频租约失败: {error}"))?;
-    transaction
-        .execute(
             "DELETE FROM history_audio_leases WHERE audio_file = ?1 AND lease_count = 1",
             params![audio_file],
         )
         .map_err(|error| format!("释放历史音频租约失败: {error}"))?;
+    transaction
+        .execute(
+            "UPDATE history_audio_leases SET lease_count = lease_count - 1, updated_at = ?2 WHERE audio_file = ?1 AND lease_count > 1",
+            params![audio_file, now_millis()],
+        )
+        .map_err(|error| format!("递减历史音频租约失败: {error}"))?;
     transaction
         .commit()
         .map_err(|error| format!("提交历史音频租约释放失败: {error}"))?;
@@ -997,6 +997,138 @@ mod tests {
         assert_eq!(leases, 0);
     }
 
+    fn run_audio_lease_test_in_child(test_name: &str) -> bool {
+        const CHILD_ENV: &str = "LIGHT_WHISPER_AUDIO_LEASE_TEST_CHILD";
+        if std::env::var(CHILD_ENV).as_deref() == Ok(test_name) {
+            return false;
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "light-whisper-audio-lease-{}-{nonce}",
+            std::process::id()
+        ));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env("LIGHT_WHISPER_DATA_DIR", &directory)
+            .env(CHILD_ENV, test_name)
+            .output()
+            .expect("run history lease test with an isolated data directory");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    async fn assert_independent_audio_leases(clean_expired: bool) {
+        super::initialize().await.unwrap();
+        let audio_file = "independent-leases.wav";
+        let audio_path = safe_audio_path(audio_file).unwrap();
+        std::fs::create_dir_all(audio_path.parent().unwrap()).unwrap();
+        let mut wav = hound::WavWriter::create(
+            &audio_path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        wav.write_sample(1_i16).unwrap();
+        wav.finalize().unwrap();
+
+        let connection = super::open_connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO transcription_history \
+                 (session_id, created_at, updated_at, mode, status, text, original_text, engine, audio_file) \
+                 VALUES (7, 1, 1, 'dictation', 'success', 'final', 'raw', 'sensevoice', ?1)",
+                params![audio_file],
+            )
+            .unwrap();
+        let id = connection.last_insert_rowid();
+        let lease_count = || {
+            connection
+                .query_row(
+                    "SELECT COALESCE((SELECT lease_count FROM history_audio_leases WHERE audio_file = ?1), 0)",
+                    params![audio_file],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+
+        for _ in 0..2 {
+            let stored = super::get_for_reprocess(id).await.unwrap().unwrap();
+            assert_eq!(stored.audio_file.as_deref(), Some(audio_file));
+            assert!(stored.record.audio_available);
+        }
+        assert_eq!(lease_count(), 2, "two acquisitions hold independent leases");
+        if clean_expired {
+            assert_eq!(super::cleanup(1).await.unwrap(), 1);
+        } else {
+            assert!(super::delete(id).await.unwrap());
+        }
+        super::cleanup_audio_if_unreferenced(audio_file.to_string())
+            .await
+            .unwrap();
+        assert!(
+            audio_path.is_file(),
+            "both holders protect the removed row's audio"
+        );
+
+        super::release_audio_lease(audio_file.to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            lease_count(),
+            1,
+            "first release must preserve the second holder"
+        );
+        super::cleanup_audio_if_unreferenced(audio_file.to_string())
+            .await
+            .unwrap();
+        assert!(
+            audio_path.is_file(),
+            "one remaining holder still protects the WAV"
+        );
+
+        super::release_audio_lease(audio_file.to_string())
+            .await
+            .unwrap();
+        assert_eq!(lease_count(), 0);
+        assert!(
+            !audio_path.exists(),
+            "last release reclaims the unreferenced WAV"
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_audio_leases_survive_source_deletion() {
+        if run_audio_lease_test_in_child(
+            "services::history_service::tests::independent_audio_leases_survive_source_deletion",
+        ) {
+            return;
+        }
+        assert_independent_audio_leases(false).await;
+    }
+
+    #[tokio::test]
+    async fn independent_audio_leases_survive_retention_cleanup() {
+        if run_audio_lease_test_in_child(
+            "services::history_service::tests::independent_audio_leases_survive_retention_cleanup",
+        ) {
+            return;
+        }
+        assert_independent_audio_leases(true).await;
+    }
+
     #[test]
     fn legacy_schema_migrates_assistant_workflow() {
         let connection = Connection::open_in_memory().expect("open legacy history database");
@@ -1051,5 +1183,142 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("read migrated schema version");
         assert_eq!(schema_version, HISTORY_SCHEMA_VERSION);
+    }
+}
+
+// Formal replay ownership: separate append-only test module.
+#[cfg(test)]
+mod async_ownership_replay_tests {
+    use super::*;
+    mod trace {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-support/async_ownership_trace.rs"
+        ));
+    }
+
+    #[tokio::test]
+    async fn tlc_history_leases_replay_public_sqlite_operations() {
+        const NAME: &str = "services::history_service::async_ownership_replay_tests::tlc_history_leases_replay_public_sqlite_operations";
+        if std::env::var("LIGHT_WHISPER_FORMAL_HISTORY_CHILD").as_deref() != Ok(NAME) {
+            let directory = std::env::temp_dir().join(format!(
+                "light-whisper-formal-history-{}-{}",
+                std::process::id(),
+                now_millis()
+            ));
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("LIGHT_WHISPER_DATA_DIR", &directory)
+                .env("LIGHT_WHISPER_FORMAL_HISTORY_CHILD", NAME)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&directory);
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        initialize().await.unwrap();
+        let connection = open_connection().unwrap();
+        let mut row_ids = std::collections::HashMap::new();
+        for audio in ["A", "B"] {
+            let file = format!("formal-{audio}.wav");
+            let path = safe_audio_path(&file).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut wav = hound::WavWriter::create(
+                &path,
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            wav.write_sample(1_i16).unwrap();
+            wav.finalize().unwrap();
+            connection.execute("INSERT INTO transcription_history (session_id, created_at, updated_at, mode, status, text, original_text, engine, audio_file) VALUES (41, 1, 1, 'dictation', 'success', 'final', 'raw', 'sensevoice', ?1)", params![file]).unwrap();
+            row_ids.insert(audio.to_string(), connection.last_insert_rowid());
+        }
+        let events = trace::load("history-leases");
+        let mut holders = std::collections::HashMap::<String, String>::new();
+        let mut release: Option<(String, String)> = None;
+        let mut phase = "idle";
+        let mut handled = 0;
+        for event in &events {
+            let parts: Vec<_> = event.split(':').collect();
+            match parts.as_slice() {
+                ["acquire", task, audio] => {
+                    let stored = get_for_reprocess(row_ids[*audio]).await.unwrap().unwrap();
+                    assert_eq!(
+                        stored.audio_file.as_deref(),
+                        Some(format!("formal-{audio}.wav").as_str())
+                    );
+                    holders.insert(task.to_string(), audio.to_string());
+                }
+                ["delete", audio] => {
+                    assert!(delete(row_ids[*audio]).await.unwrap());
+                }
+                ["gc", audio] => {
+                    cleanup_audio_if_unreferenced(format!("formal-{audio}.wav"))
+                        .await
+                        .unwrap();
+                }
+                ["release", "begin", task] => {
+                    assert_eq!(phase, "idle");
+                    release = Some((task.to_string(), holders[*task].clone()));
+                    phase = "delete-one";
+                }
+                ["release", "delete-one"] => {
+                    assert_eq!(phase, "delete-one");
+                    phase = "decrement-many";
+                }
+                ["release", "decrement-many"] => {
+                    assert_eq!(phase, "decrement-many");
+                    phase = "commit";
+                }
+                ["release", "commit"] => {
+                    assert_eq!(phase, "commit");
+                    let (task, audio) = release.take().unwrap();
+                    // SQL microsteps belong to this actual IMMEDIATE transaction.
+                    // Its public return is the observable commit boundary.
+                    release_audio_lease(format!("formal-{audio}.wav"))
+                        .await
+                        .unwrap();
+                    holders.remove(&task);
+                    phase = "idle";
+                }
+                _ => panic!("unmapped TLC history event: {event}"),
+            }
+            if phase == "idle" {
+                for audio in ["A", "B"] {
+                    let count: i64 = connection.query_row("SELECT COALESCE((SELECT lease_count FROM history_audio_leases WHERE audio_file = ?1), 0)", params![format!("formal-{audio}.wav")], |row| row.get(0)).unwrap();
+                    assert_eq!(
+                        count as usize,
+                        holders.values().filter(|held| *held == audio).count(),
+                        "lease holder mismatch after {event}"
+                    );
+                    if count > 0 {
+                        cleanup_audio_if_unreferenced(format!("formal-{audio}.wav"))
+                            .await
+                            .unwrap();
+                        assert!(safe_audio_path(&format!("formal-{audio}.wav"))
+                            .unwrap()
+                            .is_file());
+                    }
+                }
+            }
+            handled += 1;
+        }
+        assert_eq!(handled, events.len());
+        assert_eq!(phase, "idle");
+        assert_eq!(
+            holders.len(),
+            1,
+            "one independent lease survives the first release"
+        );
     }
 }

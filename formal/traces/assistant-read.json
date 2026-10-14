@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/AssistantCredentialOwnership.tla",
+  "config": "formal/AssistantCredentialReadNegative.cfg",
+  "model_sha256": "8ab660fe56b8c29542c543cd25d23afda80daf465772363b16a0342b450d4e32",
+  "config_sha256": "f7c09f35cea109b2be65e63d4d006d596e6162b0ca62d5ce52f7569f0a20cb79",
+  "counterexample": "formal/traces/assistant-read.tlc.txt",
+  "counterexample_sha256": "4a7bdcc04328d4c12f148a5cc945aaeefb49a868fc8fcc5ded942c3f43d33609",
+  "violated_invariant": "OnlyLatestReadPublishes",
+  "events": [
+    "key:switch:openai",
+    "key:read:begin:1",
+    "key:switch:deepseek",
+    "key:read:begin:2",
+    "key:read:success:2",
+    "key:read:failure:1"
+  ]
+}

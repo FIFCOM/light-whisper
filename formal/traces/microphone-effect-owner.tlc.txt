@@ -1,0 +1,72 @@
+Error: Invariant RetiredEffectCannotStopReplacement is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ one |-> "idle",
+  kind |-> "start",
+  retired |-> FALSE,
+  owner |-> 1,
+  held |-> FALSE,
+  two |-> "absent",
+  native |-> 0 ]
+
+State 2: <BeginOne line 11, col 3 to line 13, col 47 of module MicrophoneEffectOwners>
+/\ lastEvent = "effect:first:begin:start"
+/\ s = [ one |-> "pending",
+  kind |-> "start",
+  retired |-> FALSE,
+  owner |-> 1,
+  held |-> TRUE,
+  two |-> "absent",
+  native |-> 0 ]
+
+State 3: <RetireOne line 15, col 3 to line 17, col 39 of module MicrophoneEffectOwners>
+/\ lastEvent = "effect:first:retire"
+/\ s = [ one |-> "pending",
+  kind |-> "start",
+  retired |-> TRUE,
+  owner |-> 0,
+  held |-> TRUE,
+  two |-> "absent",
+  native |-> 0 ]
+
+State 4: <MountTwo line 19, col 3 to line 21, col 39 of module MicrophoneEffectOwners>
+/\ lastEvent = "effect:second:mount"
+/\ s = [ one |-> "pending",
+  kind |-> "start",
+  retired |-> TRUE,
+  owner |-> 2,
+  held |-> TRUE,
+  two |-> "queued",
+  native |-> 0 ]
+
+State 5: <SecondStart line 23, col 3 to line 25, col 48 of module MicrophoneEffectOwners>
+/\ lastEvent = "effect:second:start-complete"
+/\ s = [ one |-> "pending",
+  kind |-> "start",
+  retired |-> TRUE,
+  owner |-> 2,
+  held |-> TRUE,
+  two |-> "running",
+  native |-> 2 ]
+
+State 6: <FirstComplete line 27, col 3 to line 29, col 41 of module MicrophoneEffectOwners>
+/\ lastEvent = "effect:first:complete"
+/\ s = [ one |-> "complete",
+  kind |-> "start",
+  retired |-> TRUE,
+  owner |-> 2,
+  held |-> TRUE,
+  two |-> "running",
+  native |-> 2 ]
+
+State 7: <FirstCleanup line 31, col 3 to line 35, col 40 of module MicrophoneEffectOwners>
+/\ lastEvent = "effect:first:cleanup"
+/\ s = [ one |-> "settled",
+  kind |-> "start",
+  retired |-> TRUE,
+  owner |-> 2,
+  held |-> FALSE,
+  two |-> "running",
+  native |-> 0 ]
+

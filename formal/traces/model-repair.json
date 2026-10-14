@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/ModelIntegrityRepair.tla",
+  "config": "formal/ModelIntegrityRepairTrace.cfg",
+  "model_sha256": "12008c7b17764b1d79170b047d3a8da4f0d9b21e04590221a1bf20185daf1e36",
+  "config_sha256": "cafdbddc03eb9b19575ef888267e346686eae1d9d8bc0d6a9db75d4a98e4969c",
+  "counterexample": "formal/traces/model-repair.tlc.txt",
+  "counterexample_sha256": "f7bbe8b5dfd135fd2b11c2306c05675a847800c351f47b5add855c4ecdfcf636",
+  "violated_invariant": "RepairPathNotReached",
+  "events": [
+    "cache:fixture:invalid",
+    "cache:inspect",
+    "cache:repair:begin",
+    "cache:repair:complete",
+    "cache:inspect"
+  ]
+}

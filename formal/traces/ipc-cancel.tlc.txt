@@ -1,0 +1,38 @@
+Error: Invariant InvalidFrameCannotBeReused is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ phase |-> "idle",
+  elapsed |-> 0,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> FALSE,
+  used |-> FALSE ]
+
+State 2: <Begin line 11, col 3 to line 13, col 29 of module IpcCommandDeadline>
+/\ lastEvent = "ipc:begin"
+/\ s = [ phase |-> "write",
+  elapsed |-> 0,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> TRUE,
+  used |-> TRUE ]
+
+State 3: <Advance line 15, col 3 to line 18, col 90 of module IpcCommandDeadline>
+/\ lastEvent = "ipc:write:complete"
+/\ s = [ phase |-> "flush",
+  elapsed |-> 0,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> TRUE,
+  used |-> TRUE ]
+
+State 4: <Cancel line 28, col 3 to line 30, col 30 of module IpcCommandDeadline>
+/\ lastEvent = "ipc:cancel"
+/\ s = [ phase |-> "invalid",
+  elapsed |-> 0,
+  deadline |-> 3,
+  process |-> TRUE,
+  locked |-> FALSE,
+  used |-> TRUE ]
+

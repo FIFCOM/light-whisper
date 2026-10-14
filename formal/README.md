@@ -1,12 +1,17 @@
 # Application formal contracts
 
+This directory is source-controlled verification code and regression data.
+Keep models, configurations, Lean proofs, the coverage registry and reviewed
+replay fixtures in Git. Store per-run logs, model-checker state and downloaded
+tools under the ignored `tmp/` directory; compiled Lean output is ignored too.
+
 The application state model covers recording/capture/hotkeys, all four engine
 classes, credentials/OAuth, providers/settings/personalization, context/routing,
 selection/assistant, history, windows/subtitles, updates, theme/autostart and
 bundled protocols.
 
 [`verification.json`](verification.json) binds **124 registered commands**,
-**16 event families**, **16 lifecycle entries** and **11 protocol families** to
+**17 event families**, **16 lifecycle entries** and **11 protocol families** to
 obligations, model operators, source/test paths and explicit assumptions. CI
 rejects inventory drift, missing anchors, unasserted properties, unreachable
 explicitly declared actions, failed models/proofs and negative controls that no longer find the
@@ -27,17 +32,17 @@ automatic proof of a Rust/TypeScript function.
 
 | Area | Models |
 | --- | --- |
-| Recording and capture | RecordingLifecycle, CapturePipeline, MicrophoneMonitor |
+| Recording and capture | RecordingLifecycle, CapturePipeline, MicrophoneMonitor, MicrophoneAsyncOwnership, MicrophoneEffectOwners |
 | Hotkeys | HotkeyLifecycle (three event-kind runs plus registration workload), HotkeyPendingStart, HotkeyRegistrationEpoch, HotkeyRegistrationFailure |
-| Engines and migration | EngineDownload, RuntimeConfiguration, ModelDirectoryMigration |
+| Engines and migration | EngineDownload, RuntimeConfiguration, ModelDirectoryMigration, ModelIntegrityRepair |
 | GPU residency and settings | GpuIdleLifecycle (startup and runtime enable), GpuIdleSettings |
 | Authentication and provider pairing | OAuthLifecycle, OAuthStorage, ProviderRequests |
-| Credential publication and account snapshots | WebSearchKeys, ProviderAuthSnapshot |
+| Credential publication and account snapshots | WebSearchKeys, ProviderAuthSnapshot, AssistantCredentialOwnership |
 | Settings and personalization | ProfilePersistence, SettingsContracts, Personalization, AppProfileRules, AsyncSettings |
-| Routing, tasks and history | ContextRouting, TaskOwnership, HistoryRecords |
+| Routing, tasks and history | ContextRouting, TaskOwnership, HistoryRecords, HistoryLeaseInterleavings, OutputDrainOwnership |
 | Windows and UI state | WindowLifecycle, UiPreferences |
 | Download timers and event subscriptions | DownloadUiLifecycle, EventSubscriptionLifecycle |
-| Protocols and transport | RequestProtocols, LlmTransport |
+| Protocols and transport | RequestProtocols, LlmTransport, IpcCommandDeadline |
 
 AppWorkflow is the additional integrated model. The registry is the authoritative
 positive configuration/negative-control list. Operator names and concrete
@@ -57,6 +62,14 @@ chunks and stream done are emitted during LLM work and are outside this ordering
 claim. SettingsProfileLoad checks one representative preference through failed
 initial load, retry and saved-value restoration without multiplying the existing
 full field workload. See [optimization correspondence](evidence/optimization-20261011.md).
+
+The async ownership companions cover captured assistant credentials, microphone
+test/effect ownership, two independent history leases, overlapping dictation and
+assistant output, whole-command IPC deadlines, and corrupt-cache repair.
+[Async ownership evidence](evidence/async-ownership.md) records their exact bounds,
+negative variants, and TLC-generated replay into actual production seams.
+The normal formal gate checks model/config and raw-counterexample provenance;
+editing an event list independently of its TLC State blocks fails the gate.
 
 ## Reproduce
 

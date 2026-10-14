@@ -107,6 +107,8 @@ const zh = {
     downloadingModel: "模型下载中 {{progress}}%",
     downloadPreparing: "模型下载准备中...",
     needDownload: "需要下载模型",
+    needRepair: "模型文件已损坏，请修复后继续。",
+    repairModels: "修复模型",
     modelLoading: "模型加载中...",
     preparing: "准备中...",
     chipDownloading: "下载中",
@@ -178,6 +180,8 @@ const zh = {
     },
   },
   toast: {
+    pasteRecovery: "听写未能粘贴，请复制后恢复。",
+    pasteRecoveryCopyFailed: "复制听写内容失败，请重试。",
     correctionRecorded: "已记录修改偏好",
     correctionFailed: "记录修改偏好失败",
     aiPolishApplied: "AI 润色已应用",
@@ -258,6 +262,10 @@ const zh = {
     reasoningFallback: " 当前已保存的档位不会生效，实际会按模型默认行为处理。",
   },
   settings: {
+    savingApiKey: "正在保存 API Key...",
+    apiKeySaved: "API Key 已保存",
+    assistantKeySaveFailed: "保存 {{provider}} API Key 失败。",
+    retrySave: "重试保存",
     r2t2Language: "识别语言",
     r2t2AutoLanguage: "自动检测（推荐用于中英混合）",
     r2t2Context: "识别上下文（可选）",

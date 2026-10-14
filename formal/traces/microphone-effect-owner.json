@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/MicrophoneEffectOwners.tla",
+  "config": "formal/MicrophoneEffectOwnersNegative.cfg",
+  "model_sha256": "d9b1c5ab31ae8b0bfdcf55a547d7df1da2014a02f40a1eaf75b61dd500fc64c4",
+  "config_sha256": "fd53eaf6d19de917b8eb94211aa3ce6d717c3fdb403cee0035f06b795f51e219",
+  "counterexample": "formal/traces/microphone-effect-owner.tlc.txt",
+  "counterexample_sha256": "ddab2c3fccd24761a804b72baa6c196a5ee6af7b88e92eadee7097d4f56cc2cf",
+  "violated_invariant": "RetiredEffectCannotStopReplacement",
+  "events": [
+    "effect:first:begin:start",
+    "effect:first:retire",
+    "effect:second:mount",
+    "effect:second:start-complete",
+    "effect:first:complete",
+    "effect:first:cleanup"
+  ]
+}

@@ -109,6 +109,8 @@ const en: TranslationSchema = {
     downloadingModel: "Downloading model {{progress}}%",
     downloadPreparing: "Preparing model download...",
     needDownload: "Model download required",
+    needRepair: "Model files are damaged. Repair them to continue.",
+    repairModels: "Repair models",
     modelLoading: "Loading model...",
     preparing: "Preparing...",
     chipDownloading: "Downloading",
@@ -180,6 +182,8 @@ const en: TranslationSchema = {
     },
   },
   toast: {
+    pasteRecovery: "Dictation could not be pasted. Copy it to recover.",
+    pasteRecoveryCopyFailed: "Could not copy the dictation. Please try again.",
     correctionRecorded: "Correction preference recorded",
     correctionFailed: "Failed to record correction",
     aiPolishApplied: "AI polish applied",
@@ -260,6 +264,10 @@ const en: TranslationSchema = {
     reasoningFallback: " The saved reasoning mode will not take effect; the model's default behavior will be used.",
   },
   settings: {
+    savingApiKey: "Saving API key...",
+    apiKeySaved: "API key saved",
+    assistantKeySaveFailed: "Could not save the {{provider}} API key.",
+    retrySave: "Retry save",
     r2t2Language: "Recognition language",
     r2t2AutoLanguage: "Detect automatically (recommended for mixed languages)",
     r2t2Context: "Recognition context (optional)",

@@ -120,11 +120,19 @@ audits keep their separate review thresholds.
 | `src-tauri/src/` | Rust capture, IPC, settings and service integrations |
 | `src-tauri/resources/` | Python ASR servers, bundled VAD and runtime licenses |
 | `scripts/` | Builds, release gates, benchmarks and pinned native patches |
+| `formal/` | Versioned TLA+/Lean specifications, coverage registry and regression replay fixtures |
 | `docs/` | Development, releases and R2T2 implementation details |
 | `assets/`, `src-tauri/icons/` | Screenshots and application icons |
 
 Generated native libraries, `engine.tar.xz`, model caches, `build/` and installers
 are intentionally ignored. Rebuild them from the tracked scripts and pinned
 dependencies; do not copy local caches or credentials into Git.
+
+Keep `formal/` in Git: CI and regression tests load its models, configurations,
+proofs and checked-in replay inputs. Per-run TLC logs, state databases, downloaded
+verification tools and compiled Lean files are local artifacts. Write them under
+`tmp/` (for example, `--logs tmp/formal-results`), not beside specifications.
+The small evidence summaries and raw counterexample fixtures under `formal/`
+remain versioned so another checkout can reproduce and validate the same inputs.
 
 See [release procedure](releasing.md) and [R2T2 backend](r2t2-native.md).

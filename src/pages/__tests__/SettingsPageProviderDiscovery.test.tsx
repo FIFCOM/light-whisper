@@ -287,10 +287,12 @@ async function renderSettings(profile: UserProfile = baseProfile) {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
     resolve = nextResolve;
+    reject = nextReject;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function openProviderPicker() {
@@ -338,6 +340,283 @@ function modelInfo(id: string, ownedBy = "test-owner"): AiModelInfo {
 
 beforeEach(() => resetMocks());
 afterEach(() => vi.clearAllMocks());
+
+describe("SettingsPage assistant credential ownership", () => {
+  const profile: UserProfile = {
+    ...baseProfile,
+    llm_provider: {
+      ...baseProfile.llm_provider,
+      assistant_model: "deepseek-v4-pro",
+      assistant_provider: "deepseek",
+      assistant_use_separate_model: true,
+    },
+  };
+
+  async function selectAssistantProvider(name: string) {
+    const listbox = openAssistantProviderPicker();
+    await act(async () => {
+      fireEvent.click(within(listbox).getByRole("option", { name: new RegExp(`^${name}`) }));
+    });
+  }
+
+  async function elapseDebounce() {
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+  }
+
+  afterEach(() => vi.useRealTimers());
+
+  it("saves a delayed edit to its original provider after an assistant provider switch", async () => {
+    await renderSettings(profile);
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("Assistant API Key"), {
+      target: { value: "deepseek-draft" },
+    });
+
+    await selectAssistantProvider("OpenAI");
+    await elapseDebounce();
+
+    expect(tauriMock.setAssistantApiKey).toHaveBeenCalledWith("deepseek-draft", "deepseek");
+    expect(tauriMock.setLlmProviderConfig.mock.lastCall?.[7]).toBe("openai");
+    expect(screen.getByRole("button", { name: "Assistant Provider" })).toHaveTextContent("OpenAI");
+  });
+
+  it("waits for the actual credential write before starting a newer queued write", async () => {
+    const firstWrite = deferred<void>();
+    tauriMock.setAssistantApiKey.mockReturnValueOnce(firstWrite.promise);
+    await renderSettings(profile);
+    vi.useFakeTimers();
+    const input = screen.getByLabelText("Assistant API Key");
+    fireEvent.change(input, { target: { value: "older-draft" } });
+    await elapseDebounce();
+    expect(tauriMock.setAssistantApiKey).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(input, { target: { value: "newer-draft" } });
+    await elapseDebounce();
+    expect(tauriMock.setAssistantApiKey).toHaveBeenCalledTimes(1);
+
+    await act(async () => { firstWrite.resolve(); await firstWrite.promise; });
+    expect(tauriMock.setAssistantApiKey).toHaveBeenCalledTimes(2);
+    expect(tauriMock.setAssistantApiKey).toHaveBeenLastCalledWith("newer-draft", "deepseek");
+  });
+
+  it.each(["success", "failure"] as const)("keeps the latest provider key when an earlier read finishes with %s", async (outcome) => {
+    await renderSettings(profile);
+    const olderRead = deferred<string>();
+    const newerRead = deferred<string>();
+    tauriMock.getAssistantApiKey.mockReset()
+      .mockReturnValueOnce(olderRead.promise)
+      .mockReturnValueOnce(newerRead.promise);
+    vi.useFakeTimers();
+
+    await selectAssistantProvider("OpenAI");
+    await selectAssistantProvider("DeepSeek");
+    expect(tauriMock.getAssistantApiKey).toHaveBeenCalledTimes(2);
+    await act(async () => { newerRead.resolve("latest-deepseek-key"); await newerRead.promise; });
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("latest-deepseek-key");
+
+    await act(async () => {
+      if (outcome === "success") olderRead.resolve("old-openai-key");
+      else olderRead.reject(new Error("old provider read failed"));
+      await olderRead.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("latest-deepseek-key");
+    expect(screen.getByRole("button", { name: "Assistant Provider" })).toHaveTextContent("DeepSeek");
+    expect(tauriMock.getAssistantApiKey.mock.calls).toEqual([["openai"], ["deepseek"]]);
+    expect(tauriMock.setLlmProviderConfig.mock.lastCall?.[7]).toBe("deepseek");
+  });
+
+  it("persists the latest assistant provider when earlier configuration writes finish late", async () => {
+    await renderSettings(profile);
+    const writes: { provider: string; request: ReturnType<typeof deferred<void>>; settled: boolean }[] = [];
+    let persistedProvider = "deepseek";
+    tauriMock.setLlmProviderConfig.mockImplementation((...args: unknown[]) => {
+      const request = deferred<void>();
+      const provider = args[7] as string;
+      const write = { provider, request, settled: false };
+      writes.push(write);
+      return request.promise.then(() => {
+        write.settled = true;
+        persistedProvider = provider;
+      });
+    });
+    vi.useFakeTimers();
+
+    await selectAssistantProvider("OpenAI");
+    await selectAssistantProvider("DeepSeek");
+    expect(writes[0].provider).toBe("openai");
+
+    // Exercise out-of-order completion if writes overlap; also allow a serialized writer.
+    if (writes.length > 1) {
+      await act(async () => { writes[1].request.resolve(); await writes[1].request.promise; });
+    }
+    await act(async () => { writes[0].request.resolve(); await writes[0].request.promise; });
+    for (let index = 1; index < writes.length; index += 1) {
+      expect(index).toBeLessThan(5);
+      const write = writes[index];
+      if (!write.settled) {
+        await act(async () => { write.request.resolve(); await write.request.promise; });
+      }
+    }
+
+    expect(persistedProvider).toBe("deepseek");
+    expect(screen.getByRole("button", { name: "Assistant Provider" })).toHaveTextContent("DeepSeek");
+  });
+
+  it("keeps an edit made while the selected provider key is loading", async () => {
+    await renderSettings(profile);
+    const read = deferred<string>();
+    tauriMock.getAssistantApiKey.mockReturnValueOnce(read.promise);
+    vi.useFakeTimers();
+    await selectAssistantProvider("OpenAI");
+    fireEvent.change(screen.getByLabelText("Assistant API Key"), {
+      target: { value: "new-openai-draft" },
+    });
+
+    await act(async () => { read.resolve("previously-saved-openai-key"); await read.promise; });
+
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("new-openai-draft");
+    await elapseDebounce();
+    expect(tauriMock.setAssistantApiKey).toHaveBeenLastCalledWith("new-openai-draft", "openai");
+  });
+
+  it("retries a failed credential save for its original provider after switching providers", async () => {
+    const savedKeys: Record<string, string> = {
+      deepseek: "saved-deepseek-key",
+      openai: "saved-openai-key",
+    };
+    let backendAssistantProvider = "deepseek";
+    tauriMock.getAssistantApiKey.mockImplementation(async (provider?: string) => (
+      savedKeys[provider ?? backendAssistantProvider]
+    ));
+    tauriMock.setLlmProviderConfig.mockImplementation(async (...args: unknown[]) => {
+      backendAssistantProvider = args[7] as string;
+    });
+    tauriMock.setAssistantApiKey.mockImplementation(async (value: string, provider?: string) => {
+      savedKeys[provider ?? backendAssistantProvider] = value;
+    }).mockRejectedValueOnce(new Error("credential store unavailable"));
+    await renderSettings(profile);
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("Assistant API Key"), {
+      target: { value: "retryable-deepseek-key" },
+    });
+    await elapseDebounce();
+
+    await selectAssistantProvider("OpenAI");
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("saved-openai-key");
+    expect(screen.getByRole("button", { name: "settings.retrySave" })).toBeVisible();
+    await selectAssistantProvider("DeepSeek");
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("retryable-deepseek-key");
+    await selectAssistantProvider("OpenAI");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "settings.retrySave" }));
+    });
+
+    expect(tauriMock.setAssistantApiKey).toHaveBeenCalledTimes(2);
+    expect(tauriMock.setAssistantApiKey.mock.calls).toEqual([
+      ["retryable-deepseek-key", "deepseek"],
+      ["retryable-deepseek-key", "deepseek"],
+    ]);
+    expect(savedKeys.openai).toBe("saved-openai-key");
+    expect(savedKeys.deepseek).toBe("retryable-deepseek-key");
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("saved-openai-key");
+    await selectAssistantProvider("DeepSeek");
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("retryable-deepseek-key");
+  });
+
+  it("loads a newer shared polish credential after the assistant draft was successfully saved", async () => {
+    const savedKeys: Record<string, string> = {
+      cerebras: "saved-cerebras-key",
+      deepseek: "initial-deepseek-key",
+      openai: "saved-openai-key",
+    };
+    let polishProvider = "cerebras";
+    tauriMock.getAiPolishApiKey.mockImplementation(async () => savedKeys[polishProvider]);
+    tauriMock.getAssistantApiKey.mockImplementation(async (provider: string) => savedKeys[provider]);
+    tauriMock.setAssistantApiKey.mockImplementation(async (value: string, provider: string) => {
+      savedKeys[provider] = value;
+    });
+    // ai_polish.rs::update_ai_polish_api_key shares the provider keyring with the assistant.
+    tauriMock.saveAiPolishApiKey.mockImplementation(async (value: string) => {
+      savedKeys[polishProvider] = value;
+    });
+    tauriMock.setLlmProviderConfig.mockImplementation(async (...args: unknown[]) => {
+      polishProvider = args[0] as string;
+    });
+    await renderSettings(profile);
+    vi.useFakeTimers();
+
+    fireEvent.change(screen.getByLabelText("Assistant API Key"), {
+      target: { value: "assistant-key-a" },
+    });
+    await elapseDebounce();
+    expect(tauriMock.setAssistantApiKey).toHaveBeenCalledWith("assistant-key-a", "deepseek");
+    expect(savedKeys.deepseek).toBe("assistant-key-a");
+
+    const deepseekProviders = openProviderPicker();
+    await act(async () => {
+      fireEvent.click(within(deepseekProviders).getByRole("option", { name: /^DeepSeek/ }));
+    });
+    expect(screen.getByRole("button", { name: "Select LLM Provider" })).toHaveTextContent("DeepSeek");
+    fireEvent.change(screen.getByPlaceholderText("DeepSeek API Key"), {
+      target: { value: "shared-polish-key-b" },
+    });
+    await elapseDebounce();
+    expect(tauriMock.saveAiPolishApiKey).toHaveBeenLastCalledWith("shared-polish-key-b");
+    expect(savedKeys.deepseek).toBe("shared-polish-key-b");
+
+    const cerebrasProviders = openProviderPicker();
+    await act(async () => {
+      fireEvent.click(within(cerebrasProviders).getByRole("option", { name: /^Cerebras/ }));
+    });
+    await selectAssistantProvider("OpenAI");
+    tauriMock.getAssistantApiKey.mockClear();
+    await selectAssistantProvider("DeepSeek");
+
+    expect(tauriMock.getAssistantApiKey).toHaveBeenCalledWith("deepseek");
+    expect(savedKeys.deepseek).toBe("shared-polish-key-b");
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("shared-polish-key-b");
+  });
+
+  it("keeps the successfully saved key when a read begun during its pending draft finishes late", async () => {
+    const savedKeys: Record<string, string> = {
+      deepseek: "stored-key-b",
+      openai: "saved-openai-key",
+    };
+    const write = deferred<void>();
+    const read = deferred<void>();
+    tauriMock.getAssistantApiKey.mockImplementation(async (provider: string) => savedKeys[provider]);
+    tauriMock.setAssistantApiKey.mockImplementation(async (value: string, provider: string) => {
+      await write.promise;
+      savedKeys[provider] = value;
+    });
+    await renderSettings(profile);
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByLabelText("Assistant API Key"), {
+      target: { value: "saved-key-a" },
+    });
+    await elapseDebounce();
+    expect(tauriMock.setAssistantApiKey).toHaveBeenCalledWith("saved-key-a", "deepseek");
+
+    await selectAssistantProvider("OpenAI");
+    tauriMock.getAssistantApiKey.mockClear();
+    tauriMock.getAssistantApiKey.mockImplementation((provider: string) => {
+      const captured = savedKeys[provider];
+      return read.promise.then(() => captured);
+    });
+    await selectAssistantProvider("DeepSeek");
+    expect(tauriMock.getAssistantApiKey).toHaveBeenCalledWith("deepseek");
+    expect(savedKeys.deepseek).toBe("stored-key-b");
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("saved-key-a");
+
+    await act(async () => { write.resolve(); await write.promise; });
+    expect(savedKeys.deepseek).toBe("saved-key-a");
+    await act(async () => { read.resolve(); await read.promise; });
+
+    expect(savedKeys.deepseek).toBe("saved-key-a");
+    expect(screen.getByLabelText("Assistant API Key")).toHaveValue("saved-key-a");
+  });
+});
 
 describe("SettingsPage provider configuration saves", () => {
   it("persists a normal polish model edit after its debounce", async () => {
@@ -873,4 +1152,180 @@ describe("SettingsPage ChatGPT plan authorization", () => {
     expect(pickers[1]).toHaveAttribute("aria-expanded", "false");
     expect(pickers[2]).toHaveAttribute("aria-expanded", "true");
   });
+});
+
+
+// Formal replay ownership: separate append-only slice; accepted tests above stay frozen.
+describe("TLC assistant credential replay", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("replays the generated provider-switch counterexample through SettingsPage", async () => {
+    const { ownershipTrace } = await import("@/test/asyncOwnershipTrace");
+    const events = ownershipTrace("assistant-key");
+    const writes = new Map<string, ReturnType<typeof deferred<void>>>();
+    tauriMock.setAssistantApiKey.mockImplementation((value: string) => {
+      const pending = deferred<void>(); writes.set(value, pending); return pending.promise;
+    });
+    tauriMock.getAssistantApiKey.mockResolvedValue("baseline-deepseek");
+    await renderSettings({ ...baseProfile, llm_provider: { ...baseProfile.llm_provider,
+      assistant_use_separate_model: true, assistant_provider: "deepseek", assistant_model: "model" } });
+    await waitFor(() => expect(screen.getByLabelText("Assistant API Key")).toHaveValue("baseline-deepseek"));
+    tauriMock.getAssistantApiKey.mockReset().mockImplementation(() => new Promise<string>(() => {}));
+    let selected = "deepseek";
+    vi.useFakeTimers();
+    const captured = new Map<string, string>();
+    const handled: string[] = [];
+    for (const event of events) {
+      const parts = event.split(":");
+      if (parts[1] === "edit") {
+        captured.set(parts[2], parts[3]);
+        fireEvent.change(screen.getByLabelText("Assistant API Key"), { target: { value: `new-key-${parts[2]}` } });
+      } else if (parts[1] === "switch") {
+        selected = parts[2];
+        const picker = openAssistantProviderPicker();
+        await act(async () => { fireEvent.click(within(picker).getByRole("option", {
+          name: parts[2] === "openai" ? /^OpenAI/ : /^DeepSeek/,
+        })); });
+      } else if (parts[1] === "read" && parts[2] === "begin") {
+        expect(tauriMock.getAssistantApiKey).toHaveBeenLastCalledWith(selected);
+      } else if (parts[1] === "dispatch") {
+        await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      } else if (parts[1] === "write" && parts[2] === "begin") {
+        expect(tauriMock.setAssistantApiKey).toHaveBeenCalledWith(`new-key-${parts[3]}`, captured.get(parts[3]));
+      } else if (parts[1] === "save") {
+        const write = writes.get(`new-key-${parts[3]}`);
+        expect(write).toBeDefined();
+        await act(async () => {
+          if (parts[2] === "success") write!.resolve(); else write!.reject(new Error("keyring unavailable"));
+          await write!.promise.catch(() => undefined);
+        });
+      } else if (parts[1] === "retry") {
+        await act(async () => { fireEvent.click(screen.getByRole("button", { name: "settings.retrySave" })); });
+      } else { throw new Error(`Unmapped TLC credential event: ${event}`); }
+      handled.push(event);
+    }
+    expect(handled).toEqual(events);
+    for (const [value, provider] of tauriMock.setAssistantApiKey.mock.calls) {
+      expect(provider).toBe(captured.get((value as string).split("-").slice(-1)[0]));
+    }
+  });
+
+  it("replays a stale provider read outcome through the actual key-read effect", async () => {
+    const { ownershipTrace } = await import("@/test/asyncOwnershipTrace");
+    const events = ownershipTrace("assistant-read");
+    // Hydration completes before trace numbering begins. Each generated read
+    // then binds exactly one actual provider callback, never an incidental read.
+    tauriMock.getAssistantApiKey.mockResolvedValue("baseline-deepseek");
+    await renderSettings({ ...baseProfile, llm_provider: { ...baseProfile.llm_provider,
+      assistant_use_separate_model: true, assistant_provider: "deepseek", assistant_model: "model" } });
+    await waitFor(() => expect(screen.getByLabelText("Assistant API Key")).toHaveValue("baseline-deepseek"));
+    const callbacks: { provider: string; request: ReturnType<typeof deferred<string>> }[] = [];
+    tauriMock.getAssistantApiKey.mockReset().mockImplementation((provider: string) => {
+      const request = deferred<string>(); callbacks.push({ provider, request }); return request.promise;
+    });
+    let selected = "deepseek";
+    const reads = new Map<string, { provider: string; request: ReturnType<typeof deferred<string>> }>();
+    let establishedCurrentKey = "";
+    let handled = 0;
+    for (const event of events) {
+      const parts = event.split(":");
+      if (parts[1] === "switch") {
+        selected = parts[2];
+        const before = callbacks.length;
+        const picker = openAssistantProviderPicker();
+        await act(async () => { fireEvent.click(within(picker).getByRole("option", {
+          name: selected === "openai" ? /^OpenAI/ : /^DeepSeek/,
+        })); });
+        expect(callbacks.length).toBe(before + 1);
+        expect(callbacks[before].provider).toBe(selected);
+      } else if (parts[1] === "read" && parts[2] === "begin") {
+        const id = Number(parts[3]);
+        expect(callbacks.length).toBe(id);
+        expect(reads.size).toBe(id - 1);
+        const callback = callbacks[id - 1];
+        expect(callback.provider).toBe(selected);
+        reads.set(parts[3], callback);
+      } else if (parts[1] === "read" && ["success", "failure"].includes(parts[2])) {
+        const callback = reads.get(parts[3]); expect(callback).toBeDefined();
+        const key = `saved-${callback!.provider}-${parts[3]}`;
+        const stale = callback!.provider !== selected;
+        if (stale) {
+          expect(establishedCurrentKey).not.toBe("");
+          expect(screen.getByLabelText("Assistant API Key")).toHaveValue(establishedCurrentKey);
+        }
+        await act(async () => {
+          if (parts[2] === "success") callback!.request.resolve(key);
+          else callback!.request.reject(new Error("stale provider read failed"));
+          await callback!.request.promise.catch(() => undefined);
+        });
+        if (stale) expect(screen.getByLabelText("Assistant API Key")).toHaveValue(establishedCurrentKey);
+        else { establishedCurrentKey = key; expect(screen.getByLabelText("Assistant API Key")).toHaveValue(key); }
+      } else { throw new Error(`Unmapped TLC credential read event: ${event}`); }
+      handled += 1;
+    }
+    expect(handled).toBe(events.length);
+    expect(establishedCurrentKey).not.toBe("");
+  });
+
+  it("replays a read captured while dirty after the matching save clears its draft", async () => {
+    const { ownershipTrace } = await import("@/test/asyncOwnershipTrace");
+    const events = ownershipTrace("assistant-saved-read");
+    tauriMock.getAssistantApiKey.mockResolvedValue("baseline-deepseek");
+    await renderSettings({ ...baseProfile, llm_provider: { ...baseProfile.llm_provider,
+      assistant_use_separate_model: true, assistant_provider: "deepseek", assistant_model: "model" } });
+    await waitFor(() => expect(screen.getByLabelText("Assistant API Key")).toHaveValue("baseline-deepseek"));
+    const callbacks: { provider: string; request: ReturnType<typeof deferred<string>> }[] = [];
+    const reads = new Map<string, typeof callbacks[number]>();
+    const writes = new Map<string, ReturnType<typeof deferred<void>>>();
+    const draft = new Map<string, string>();
+    let selected = "deepseek";
+    tauriMock.getAssistantApiKey.mockReset().mockImplementation((provider: string) => {
+      const request = deferred<string>(); callbacks.push({ provider, request }); return request.promise;
+    });
+    tauriMock.setAssistantApiKey.mockImplementation((value: string) => {
+      const request = deferred<void>(); writes.set(value, request); return request.promise;
+    });
+    vi.useFakeTimers();
+    let capturedDirty = false; let completedSave = false; let checkedLateRead = false; let handled = 0;
+    for (const event of events) {
+      const parts = event.split(":");
+      if (parts[1] === "edit") {
+        const value = `draft-${parts[2]}`; draft.set(parts[3], value);
+        fireEvent.change(screen.getByLabelText("Assistant API Key"), { target: { value } });
+      } else if (parts[1] === "switch") {
+        selected = parts[2]; const before = callbacks.length; const picker = openAssistantProviderPicker();
+        await act(async () => { fireEvent.click(within(picker).getByRole("option", {
+          name: selected === "openai" ? /^OpenAI/ : /^DeepSeek/,
+        })); });
+        expect(callbacks.length).toBe(before + 1); expect(callbacks[before].provider).toBe(selected);
+      } else if (parts[1] === "dispatch") {
+        await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      } else if (parts[1] === "write" && parts[2] === "begin") {
+        expect(writes.has(`draft-${parts[3]}`)).toBe(true);
+      } else if (parts[1] === "save" && parts[2] === "success") {
+        const write = writes.get(`draft-${parts[3]}`)!;
+        await act(async () => { write.resolve(); await write.promise; }); completedSave = true;
+      } else if (parts[1] === "read" && parts[2] === "begin") {
+        const id = Number(parts[3]); expect(callbacks.length).toBe(id); expect(reads.size).toBe(id - 1);
+        reads.set(parts[3], callbacks[id - 1]);
+        if (draft.has(selected)) capturedDirty = true;
+      } else if (parts[1] === "read" && ["success", "failure"].includes(parts[2])) {
+        const read = reads.get(parts[3])!;
+        const currentDraft = draft.get(read.provider);
+        await act(async () => {
+          if (parts[2] === "success") read.request.resolve(`old-stored-${read.provider}`);
+          else read.request.reject(new Error("late stored-key read failed"));
+          await read.request.promise.catch(() => undefined);
+        });
+        if (currentDraft && read.provider === selected) {
+          expect(capturedDirty && completedSave).toBe(true);
+          expect(screen.getByLabelText("Assistant API Key")).toHaveValue(currentDraft);
+          checkedLateRead = true;
+        }
+      } else { throw new Error(`Unmapped TLC saved-draft event: ${event}`); }
+      handled += 1;
+    }
+    expect(handled).toBe(events.length); expect(checkedLateRead).toBe(true);
+  });
+
 });

@@ -1,5 +1,10 @@
 # Shell scripts must keep LF endings
 *.sh text eol=lf
+# Formal replay provenance hashes these text files byte for byte on every OS.
+formal/*.tla text eol=lf
+formal/*.cfg text eol=lf
+# Raw TLC state blocks retain their final blank separator for provenance hashes.
+formal/traces/*.tlc.txt text eol=lf whitespace=-blank-at-eof
 # Native runtime manifests hash the reviewed patch byte for byte.
 # Unified-diff context lines contain a required leading space, even when blank.
 scripts/patches/*.patch text eol=lf whitespace=-blank-at-eol

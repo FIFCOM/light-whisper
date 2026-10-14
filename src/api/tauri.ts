@@ -381,12 +381,12 @@ export function setScreenVisionApiKey(provider: string, apiKey: string): Promise
   return invokeCommand<void>("set_screen_vision_api_key", { provider, apiKey });
 }
 
-export function setAssistantApiKey(apiKey: string): Promise<void> {
-  return invokeCommand<void>("set_assistant_api_key", { apiKey });
+export function setAssistantApiKey(apiKey: string, provider?: string): Promise<void> {
+  return invokeCommand<void>("set_assistant_api_key", { apiKey, provider });
 }
 
-export function getAssistantApiKey(): Promise<string> {
-  return invokeCommand<string>("get_assistant_api_key", {});
+export function getAssistantApiKey(provider?: string): Promise<string> {
+  return invokeCommand<string>("get_assistant_api_key", { provider });
 }
 
 export function getLlmReasoningSupport(

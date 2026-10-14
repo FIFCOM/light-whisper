@@ -30,6 +30,8 @@ export interface FunASRStatus {
   engine?: string;
   models_present?: boolean;
   missing_models?: string[];
+  model_state?: "ready" | "missing" | "corrupt";
+  corrupt_models?: string[];
 }
 
 // 与 Rust 后端 funasr_service::ModelCheckResult 对应
@@ -41,6 +43,8 @@ export interface ModelCheckResult {
   engine?: string;
   cache_path: string;
   missing_models: string[];
+  model_state?: "ready" | "missing" | "corrupt";
+  corrupt_models?: string[];
 }
 
 // 转录历史记录

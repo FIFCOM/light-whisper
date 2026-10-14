@@ -1,0 +1,74 @@
+Error: Invariant ChangedTargetNeverBlindPastes is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ a |-> "processing",
+  b |-> "idle",
+  queue |-> <<>>,
+  scheduled |-> FALSE,
+  target |-> 100,
+  foreground |-> 100,
+  delivered |-> "none",
+  changed |-> FALSE,
+  exited |-> FALSE ]
+
+State 2: <StartB line 12, col 3 to line 13, col 70 of module OutputDrainOwnership>
+/\ lastEvent = "output:B:start"
+/\ s = [ a |-> "processing",
+  b |-> "starting",
+  queue |-> <<>>,
+  scheduled |-> FALSE,
+  target |-> 100,
+  foreground |-> 100,
+  delivered |-> "none",
+  changed |-> FALSE,
+  exited |-> FALSE ]
+
+State 3: <CompleteA line 18, col 3 to line 20, col 37 of module OutputDrainOwnership>
+/\ lastEvent = "output:A:complete"
+/\ s = [ a |-> "done",
+  b |-> "starting",
+  queue |-> <<[target |-> 100, session |-> 41, text |-> "Dictation A"]>>,
+  scheduled |-> FALSE,
+  target |-> 100,
+  foreground |-> 100,
+  delivered |-> "none",
+  changed |-> FALSE,
+  exited |-> FALSE ]
+
+State 4: <ChangeTarget line 22, col 3 to line 24, col 41 of module OutputDrainOwnership>
+/\ lastEvent = "output:target:changed"
+/\ s = [ a |-> "done",
+  b |-> "starting",
+  queue |-> <<[target |-> 100, session |-> 41, text |-> "Dictation A"]>>,
+  scheduled |-> FALSE,
+  target |-> 100,
+  foreground |-> 200,
+  delivered |-> "none",
+  changed |-> TRUE,
+  exited |-> FALSE ]
+
+State 5: <ExitB line 26, col 3 to line 31, col 42 of module OutputDrainOwnership>
+/\ lastEvent = "output:B:exit:cancel"
+/\ s = [ a |-> "done",
+  b |-> "idle",
+  queue |-> <<[target |-> 100, session |-> 41, text |-> "Dictation A"]>>,
+  scheduled |-> TRUE,
+  target |-> 100,
+  foreground |-> 200,
+  delivered |-> "none",
+  changed |-> TRUE,
+  exited |-> TRUE ]
+
+State 6: <Drain line 33, col 3 to line 36, col 32 of module OutputDrainOwnership>
+/\ lastEvent = "output:drain"
+/\ s = [ a |-> "done",
+  b |-> "idle",
+  queue |-> <<>>,
+  scheduled |-> FALSE,
+  target |-> 100,
+  foreground |-> 200,
+  delivered |-> "paste",
+  changed |-> TRUE,
+  exited |-> TRUE ]
+

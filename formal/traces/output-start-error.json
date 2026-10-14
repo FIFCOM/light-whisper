@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/OutputDrainOwnership.tla",
+  "config": "formal/OutputStartErrorNegative.cfg",
+  "model_sha256": "b5fca3196bb4ccc00175e8fa0d17dfe77e99fac3a16b9bfd5a4a0377952cf2fc",
+  "config_sha256": "5127e3b4cac4cef06450b13618462212c3e726a34e86479d37a3ee8ead93a73d",
+  "counterexample": "formal/traces/output-start-error.tlc.txt",
+  "counterexample_sha256": "695c07d755d4d698009dcfdeafa3fdd46ad585078d48b1b4cfcd6219068aa1db",
+  "violated_invariant": "IdlePendingHasScheduledDrain",
+  "events": [
+    "output:B:start",
+    "output:A:complete",
+    "output:B:exit:start_error"
+  ]
+}

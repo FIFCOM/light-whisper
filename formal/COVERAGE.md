@@ -34,8 +34,12 @@ an explicit contract, with actual source and evidence paths.
   restoration outcomes, including stale-gate/orphan-registration cleanup.
   Physical native IDs remain owned by queued cleanup until the backend drains
   them; this is eventual under scheduling fairness, not instant OS removal.
-- History uses five rows, two audio identities, one lease and bounded retention.
-  Shared rows and deletion during reprocessing are reachable cases.
+- HistoryRecords uses five rows, three audio classes (two initially present), one
+  reprocessor/count-one lease and bounded retention. HistoryLeaseInterleavings
+  separately checks two independent holders sharing two audio identities, with
+  release after source-row removal. The SQL DELETE count-one and UPDATE
+  greater-than-one phases are explicit; holder/count equality is asserted outside
+  the transaction. This companion does not replace the detailed base model.
 - Runtime enumerates Qwen/R2T2/GLM/Alibaba, two regions/directories, two key saves,
   one download/input and bounded generations.
 - Web search publication separates ownership, keyring I/O and cache publication
@@ -58,6 +62,29 @@ an explicit contract, with actual source and evidence paths.
 - SettingsProfileLoad uses one History field and two reads to check initial
   failure/retry and blocked writes before successful restoration. Existing
   SettingsContracts keeps its full command/validation field partition.
+- AssistantCredentialOwnership uses two edits, two provider switches, two
+  independent reads, serialized real-write completion, save failure and one
+  retry per edit. Read eligibility captures the dirty draft and version; a late
+  read cannot become publishable merely because a matching save cleared it.
+- MicrophoneAsyncOwnership uses two independent test owners, out-of-order
+  success/failure, one intent retirement and stop/start/compensation phases.
+  MicrophoneEffectOwners adds two mounted effect owners and the shared native
+  operation queue; retired test/start cleanup must preserve the replacement.
+- OutputDrainOwnership starts with dictation A processing while assistant B
+  starts/records, then explores success/error/start-cancel/start-error exits and
+  one foreground change. Pending items preserve session, target and text. The
+  production controller replay uses actual AppState and dispatch locking with an
+  injected native paste primitive; source guards check terminal scheduling.
+  One finalizer per unique recording session is assumed. Pending deduplication
+  does not promise global exactly-once delivery after a session has drained.
+- IpcCommandDeadline separates write, flush and read with one three-tick budget;
+  partial-frame cancellation invalidates the process and releases ownership.
+  Actual child-pipe tests cover blocked write, progress and cancellation.
+- ModelIntegrityRepair partitions absent/valid/invalid completion metadata,
+  missing/large weight files, explicit repair and reinspection. A separate false
+  reachability target generates the repair path; it is not a safety proof.
+  Replay calls actual cache resolvers and downloader integrity/atomic-manifest
+  publication on temporary local bytes, without GPU inference.
 - Parameter-independent ownership/version/first-match/consent/restoration and
   decision contracts have Lean proofs. Production correspondence is reviewed
   code plus tests, not an automatic source refinement theorem.

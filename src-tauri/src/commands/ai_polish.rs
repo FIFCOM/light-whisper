@@ -992,18 +992,21 @@ pub async fn set_assistant_api_key(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     api_key: String,
+    provider: Option<String>,
 ) -> Result<(), String> {
-    let provider = state.with_profile(|p| p.llm_provider.resolve_assistant_provider());
+    let provider = provider
+        .unwrap_or_else(|| state.with_profile(|p| p.llm_provider.resolve_assistant_provider()));
     let keyring_user = llm_provider::keyring_user_for_provider(&provider);
 
     llm_provider::save_or_delete_api_key(&app_handle, &keyring_user, &api_key)?;
-    state.set_assistant_api_key(api_key.clone());
-
-    // 若与润色共享 provider，同步润色缓存
-    let polish_provider = state.active_llm_provider();
-    if provider == polish_provider {
-        state.set_ai_polish_api_key(api_key);
-    }
+    state.with_profile(|profile| {
+        if profile.llm_provider.resolve_assistant_provider() == provider {
+            state.set_assistant_api_key(api_key.clone());
+        }
+        if profile.llm_provider.resolve_active_provider() == provider {
+            state.set_ai_polish_api_key(api_key);
+        }
+    });
 
     log::info!("助手 API Key 已更新: provider={}", provider);
     Ok(())
@@ -1013,8 +1016,10 @@ pub async fn set_assistant_api_key(
 pub async fn get_assistant_api_key(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    provider: Option<String>,
 ) -> Result<String, String> {
-    let provider = state.with_profile(|p| p.llm_provider.resolve_assistant_provider());
+    let provider = provider
+        .unwrap_or_else(|| state.with_profile(|p| p.llm_provider.resolve_assistant_provider()));
     Ok(llm_provider::load_api_key_for_provider(
         &app_handle,
         &provider,

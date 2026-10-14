@@ -508,6 +508,10 @@
     ],
     "waveform": [
       "capture"
+    ],
+    "paste-recovery": [
+      "clipboard",
+      "recording"
     ]
   },
   "lifecycle": {
@@ -673,7 +677,7 @@
       "assumptions": "Audio driver success and sample values are inputs; bounded samples represent arbitrary content; RecordingOwnsMonitor begins after the synchronous stop, not the earlier slot reservation."
     },
     "monitor": {
-      "obligation": "Stop invalidates pending starts; recording ownership prevents late idle-monitor publication; disposed effects never restart monitoring.",
+      "obligation": "Stop invalidates pending starts; recording ownership prevents late idle-monitor publication; disposed effects never restart monitoring. Monitor restart rechecks active/enabled/mounted/recording/current generation after awaits; late native start is compensated; only the newest overlapping test may resume.",
       "models": {
         "MicrophoneMonitor": [
           "Begin",
@@ -682,6 +686,27 @@
         ],
         "CapturePipeline": [
           "MonitorDeviceIsResolved"
+        ],
+        "MicrophoneAsyncOwnership": [
+          "TestBegin",
+          "TestComplete",
+          "Reconcile",
+          "Stop",
+          "Intent",
+          "StartComplete",
+          "Compensate",
+          "SettledMonitorHonorsIntent",
+          "ReadinessHasCurrentOwner",
+          "OlderTestCannotResume"
+        ],
+        "MicrophoneEffectOwners": [
+          "BeginOne",
+          "RetireOne",
+          "MountTwo",
+          "SecondStart",
+          "FirstComplete",
+          "FirstCleanup",
+          "RetiredEffectCannotStopReplacement"
         ]
       },
       "implementation": [
@@ -690,12 +715,15 @@
       ],
       "evidence": [
         "src/hooks/__tests__/useMicrophoneSettings.test.tsx",
-        "src-tauri/src/services/audio_service/monitor.rs#stop_and_new_recording_reject_late_monitor_start"
+        "src-tauri/src/services/audio_service/monitor.rs#stop_and_new_recording_reject_late_monitor_start",
+        "src/hooks/__tests__/useMicrophoneSettings.test.tsx#TLC microphone intent replay",
+        "formal/evidence/async-ownership.md",
+        "src/hooks/__tests__/useMicrophoneSettings.test.tsx#TLC microphone effect replacement replay"
       ],
-      "assumptions": "Driver initialization can take time and must observe cancellation; the property guards publication, not an instantaneous hardware shutdown guarantee."
+      "assumptions": "Driver initialization can take time and must observe cancellation; the property guards publication, not an instantaneous hardware shutdown guarantee. Two independent microphone test requests with out-of-order success/failure, one intent retirement and serialized stop/start/compensation phases. Native stop eventually settles; physical instantaneous shutdown is not asserted. A second companion separates two hook instances, a shared native-operation queue, late first start compensation and retired test completion; global native ownership prevents retired cleanup from stopping its replacement."
     },
     "engine": {
-      "obligation": "Engine/directory changes respect busy capture/download; late starts cannot publish; cloud readiness uses its captured key slot.",
+      "obligation": "Engine/directory changes respect busy capture/download; late starts cannot publish; cloud readiness uses its captured key slot. Present invalid completion metadata is authoritative corrupt state even with a large weight; absent metadata retains legacy compatibility; corrupt/missing status offers explicit repair, and a verified repair becomes ready.",
       "models": {
         "AsyncSettings": [
           "NoPostUnmountPublication"
@@ -708,6 +736,15 @@
         ],
         "EngineDownload": [
           "RunningUsesCurrentConfig"
+        ],
+        "ModelIntegrityRepair": [
+          "Provision",
+          "Inspect",
+          "RepairBegin",
+          "RepairComplete",
+          "CorruptAlwaysOffersRepair",
+          "LegacyAbsentManifestStillWorks",
+          "ReadyAfterExplicitRepair"
         ]
       },
       "implementation": [
@@ -715,15 +752,20 @@
         "src-tauri/src/services/funasr_service.rs",
         "src-tauri/src/services/alibaba_asr_service.rs",
         "src-tauri/src/services/glm_asr_service.rs",
-        "src/hooks/useModelStatus.ts"
+        "src/hooks/useModelStatus.ts",
+        "src-tauri/resources/hf_cache_utils.py",
+        "src-tauri/resources/download_models.py"
       ],
       "evidence": [
         "src-tauri/src/commands/funasr.rs",
         "src/hooks/__tests__/useAsrEngineSettings.test.tsx",
         "src/hooks/__tests__/useModelStatus.test.tsx",
-        "scripts/check_request_snapshot.py"
+        "scripts/check_request_snapshot.py",
+        "src-tauri/resources/test_async_ownership_replay.py",
+        "src-tauri/resources/test_model_integrity_regression.py",
+        "formal/evidence/async-ownership.md"
       ],
-      "assumptions": "Four engine classes; model output correctness and filesystem/driver/network primitives are outside proof. Ready/error values are environmental inputs."
+      "assumptions": "Four engine classes; model output correctness and filesystem/driver/network primitives are outside proof. Ready/error values are environmental inputs. Cache integrity companion partitions absent/valid/invalid manifest and absent/large weights. A positive trace witness reaches repair completion; this reachability target is deliberately false and is not a safety proof. Actual replay calls cache resolvers and explicit download_model verification/atomic manifest publication on temporary local bytes; no GPU/model inference internals are claimed."
     },
     "download": {
       "obligation": "A cancelled download retains ownership/configuration until worker termination; cleanup cannot release a newer task; cancellation/unmount revoke frontend timers and old asynchronous callbacks.",
@@ -822,7 +864,7 @@
       "assumptions": "Identity-provider authentication and cryptography are trusted; generation counters must not wrap; storage durability is a separate obligation."
     },
     "keys": {
-      "obligation": "Failed keyring write/delete is returned before publishing runtime caches; missing deletes are idempotent; saves, lazy loads and startup restore serialize storage and cache publication.",
+      "obligation": "Failed keyring write/delete is returned before publishing runtime caches; missing deletes are idempotent; saves, lazy loads and startup restore serialize storage and cache publication. Assistant delayed edits and retry retain captured provider; actual writes serialize; newest provider/read/edit ownership controls read publication.",
       "models": {
         "SettingsContracts": [
           "KeyWrite",
@@ -834,6 +876,21 @@
           "NoStaleReadPublication",
           "PendingOperationOwnsGate",
           "OperationsSettle"
+        ],
+        "AssistantCredentialOwnership": [
+          "Edit",
+          "Switch",
+          "Dispatch",
+          "BeginWrite",
+          "SaveSuccess",
+          "SaveFailure",
+          "Retry",
+          "ReadBegin",
+          "ReadComplete",
+          "CapturedProviderReceivesKey",
+          "SaveVersionsNeverGoBackwards",
+          "OnlyLatestReadPublishes",
+          "OneWriteOwnsStorage"
         ]
       },
       "implementation": [
@@ -842,15 +899,19 @@
         "src-tauri/src/commands/assistant.rs",
         "src-tauri/src/commands/funasr.rs",
         "src-tauri/src/lib.rs",
-        "src-tauri/src/state/app_state.rs#with_web_search_key_operation"
+        "src-tauri/src/state/app_state.rs#with_web_search_key_operation",
+        "src/pages/SettingsPage.tsx",
+        "src/api/tauri.ts"
       ],
       "evidence": [
         "src-tauri/src/services/llm_provider.rs#credential_persistence_tests",
         "src-tauri/src/commands/assistant.rs#keyed_web_search_providers_use_isolated_keyring_slots",
         "src-tauri/src/state/web_search_key_tests.rs",
-        "scripts/check_request_snapshot.py"
+        "scripts/check_request_snapshot.py",
+        "src/pages/__tests__/SettingsPageProviderDiscovery.test.tsx#TLC assistant credential replay",
+        "formal/evidence/async-ownership.md"
       ],
-      "assumptions": "Single keyring operations are atomic; physical OAuth multi-store commits are modeled separately. Getter failure is an unavailable credential, never proof of deletion."
+      "assumptions": "Single keyring operations are atomic; physical OAuth multi-store commits are modeled separately. Getter failure is an unavailable credential, never proof of deletion. Companion model bounds two edits, two provider switches, two independent reads, success/failure and one retry per edit. UI/keyring promises and provider callbacks are checked with actual SettingsPage fixtures; native keyring internals are trusted. Read eligibility snapshots both the dirty draft and request/edit ownership: failed writes retain drafts; only matching successful writes clear them; a read started while dirty cannot become publishable after that clearing. Initial hydration is outside the companion; each provider switch captures a read before subsequent edits or matching save-clear transitions."
     },
     "profile-save": {
       "obligation": "Each profile update queues its own current version under the same ordering lock; settled disk is latest.",
@@ -1061,26 +1122,43 @@
       "assumptions": "OS selection and paste operations are external; two context versions represent arbitrary text, not recognition correctness."
     },
     "clipboard": {
-      "obligation": "Paste restores clipboard only when clipboard still contains the text owned by that paste; assistant output is never auto-pasted.",
+      "obligation": "Paste restores clipboard only when clipboard still contains the text owned by that paste; assistant output is never auto-pasted. A completed dictation remains a distinct session/text/original-target queue item while a second assistant occupies the recording slot; all eligible terminal paths schedule a drain; unknown/changed targets and paste failures expose original text for recovery.",
       "models": {
         "AppWorkflow": [
           "ExternalClipboardIsPreserved",
           "AssistantNeverPastes",
           "PasteHasText"
+        ],
+        "OutputDrainOwnership": [
+          "StartB",
+          "StartedB",
+          "CompleteA",
+          "ChangeTarget",
+          "ExitB",
+          "Drain",
+          "IdlePendingHasScheduledDrain",
+          "ChangedTargetNeverBlindPastes",
+          "QueuedIdentityRetained"
         ]
       },
       "implementation": [
         "src-tauri/src/commands/clipboard.rs",
-        "src-tauri/src/services/audio_service/finalize.rs"
+        "src-tauri/src/services/audio_service/finalize.rs",
+        "src-tauri/src/services/audio_service/output.rs",
+        "src-tauri/src/commands/audio.rs"
       ],
       "evidence": [
         "src-tauri/src/commands/clipboard.rs",
-        "formal/lean/StateContracts.lean"
+        "formal/lean/StateContracts.lean",
+        "src-tauri/src/services/audio_service/output_tests.rs#tlc_output_replays_actual_drain_controller_and_foreground_recovery",
+        "scripts/test_async_output_wiring.py",
+        "src/hooks/__tests__/useRecordingOutputRecovery.test.tsx",
+        "formal/evidence/async-ownership.md"
       ],
-      "assumptions": "OS clipboard reads/writes and key injection may fail; success means the API acknowledged the operation, not that a foreign application consumed it."
+      "assumptions": "OS clipboard reads/writes and key injection may fail; success means the API acknowledged the operation, not that a foreign application consumed it. Companion output model starts with A processing and independently records B starting/recording. It checks success/error/start-cancel/start-error exits and one focus change. Real queue/controller replay injects only the native paste primitive; source wiring tests establish terminal scheduling correspondence. OS focus remains sampled, and foreign-app consumption is not proved. One production finalizer owns each unique recording session; the queue deduplicates only currently pending session IDs and deliberately permits re-enqueue after a drain. There is no global exactly-once ledger."
     },
     "history": {
-      "obligation": "Persist only with consent; audio writes may overlap ASR/LLM, but audio resolution and history persistence attempts settle before terminal transcription/subtitle publication and paste authorization; transactions are atomic; shared referenced/leased audio survives GC; reprocess retains captured source.",
+      "obligation": "Persist only with consent; audio writes may overlap ASR/LLM, but audio resolution and history persistence attempts settle before terminal transcription/subtitle publication and paste authorization; transactions are atomic; shared referenced/leased audio survives GC; reprocess retains captured source. After each SQL transaction, each audio lease count equals the number of independent holders; releasing the first of two shared holders must retain the second.",
       "models": {
         "HistoryRecords": [
           "SaveAudioGate",
@@ -1096,6 +1174,17 @@
           "SaveHistory",
           "HistoryWriteFailure",
           "HistorySettlesBeforePublication"
+        ],
+        "HistoryLeaseInterleavings": [
+          "Acquire",
+          "Remove",
+          "BeginRelease",
+          "DeleteOne",
+          "DecrementMany",
+          "CommitRelease",
+          "Collect",
+          "LeaseCountMatchesHolders",
+          "LiveHoldersKeepAudio"
         ]
       },
       "implementation": [
@@ -1107,9 +1196,11 @@
         "src-tauri/src/services/history_service.rs",
         "formal/evidence/history.md",
         "src/pages/__tests__/HistoryPage.test.tsx",
-        "src-tauri/src/services/history_service.rs#latency_percentiles_match_sorted_rank_for_empty_tied_and_large_inputs"
+        "src-tauri/src/services/history_service.rs#latency_percentiles_match_sorted_rank_for_empty_tied_and_large_inputs",
+        "src-tauri/src/services/history_service.rs#tlc_history_leases_replay_public_sqlite_operations",
+        "formal/evidence/async-ownership.md"
       ],
-      "assumptions": "SQLite transactions and successful filesystem deletion are trusted primitives; five rows/audio classes and one lease; DB errors retain audio conservatively. Finalization may publish after a failed audio/history write, but must first await its completion. Publication here means terminal transcription/subtitle results and paste authorization; assistant stream chunks and stream done arrive during LLM work and are excluded. Scheduling permits audio I/O to remain pending during LLM work; the model does not prove a wall-clock speedup."
+      "assumptions": "SQLite transactions and successful filesystem deletion are trusted primitives; detailed base bound of five rows, three audio classes and one reprocessor/count-one lease; DB errors retain audio conservatively. Finalization may publish after a failed audio/history write, but must first await its completion. Publication here means terminal transcription/subtitle results and paste authorization; assistant stream chunks and stream done arrive during LLM work and are excluded. Scheduling permits audio I/O to remain pending during LLM work; the model does not prove a wall-clock speedup. HistoryRecords retains its detailed five-row, three audio-class, single-reprocessor/count-one bound. HistoryLeaseInterleavings adds two independent tasks and two shared audio identities; release is DELETE count=1, UPDATE count>1, then commit. Equality is asserted outside the transaction; row deletion and GC interleave only at commit boundaries."
     },
     "windows": {
       "obligation": "Only current show/hide generations publish; interactive state requires a window; exit signals capture and reaps child.",
@@ -1197,7 +1288,7 @@
       "assumptions": "OS key delivery/debounce clock are inputs; all three event kinds get separate configurations; bounded representative registration permutations are explicit."
     },
     "transport": {
-      "obligation": "Request IDs are required; cancelled replies are ignored; streams validate identity, offsets, prefix, terminal output and sample bounds.",
+      "obligation": "Request IDs are required; cancelled replies are ignored; streams validate identity, offsets, prefix, terminal output and sample bounds. One total command deadline covers stdin write, flush and reply read; timeout or cancellation invalidates the owned process and releases the command lock.",
       "models": {
         "RequestProtocols": [
           "NoReplyWithoutIdentity",
@@ -1210,6 +1301,15 @@
           "FiniteCapabilityProbing",
           "HeartbeatCannotExtendBudget",
           "RequestsSettle"
+        ],
+        "IpcCommandDeadline": [
+          "Begin",
+          "Advance",
+          "Tick",
+          "Cancel",
+          "Reply",
+          "OneTotalDeadline",
+          "InvalidFrameCannotBeReused"
         ]
       },
       "implementation": [
@@ -1221,9 +1321,11 @@
       "evidence": [
         "src-tauri/src/services/funasr_service.rs#request_identity_tests",
         "src-tauri/src/services/funasr_service/native_stream_tests.rs",
-        "src-tauri/src/services/llm_reasoning_negotiation_tests.rs"
+        "src-tauri/src/services/llm_reasoning_negotiation_tests.rs",
+        "src-tauri/src/services/funasr_service/ipc_recovery_tests.rs#tlc_ipc_deadline_replays_write_progress_without_restarting_the_budget",
+        "formal/evidence/async-ownership.md"
       ],
-      "assumptions": "Current bundled servers echo request_id; older incompatible engines need updating. Clock/scheduler/network timeout fairness required; providers may fail."
+      "assumptions": "Current bundled servers echo request_id; older incompatible engines need updating. Clock/scheduler/network timeout fairness required; providers may fail. Write/flush/read phases use a three-tick total deadline; successful I/O progress never resets it. Real child-pipe replay checks blocked write, write progress before deadline and cancellation, then installs a fresh server. Scheduler/clock fairness and OS pipe semantics remain environmental assumptions."
     },
     "updater": {
       "obligation": "Update versions compare by the actual numeric parser; release opening accepts HTTPS GitHub hosts only and reports errors.",
@@ -1425,6 +1527,27 @@
     ],
     "GpuIdleSettings": [
       "GpuIdleSettings.cfg"
+    ],
+    "AssistantCredentialOwnership": [
+      "AssistantCredentialOwnership.cfg"
+    ],
+    "MicrophoneAsyncOwnership": [
+      "MicrophoneAsyncOwnership.cfg"
+    ],
+    "HistoryLeaseInterleavings": [
+      "HistoryLeaseInterleavings.cfg"
+    ],
+    "OutputDrainOwnership": [
+      "OutputDrainOwnership.cfg"
+    ],
+    "IpcCommandDeadline": [
+      "IpcCommandDeadline.cfg"
+    ],
+    "MicrophoneEffectOwners": [
+      "MicrophoneEffectOwners.cfg"
+    ],
+    "ModelIntegrityRepair": [
+      "ModelIntegrityRepair.cfg"
     ]
   },
   "actions": {
@@ -1482,6 +1605,64 @@
       "FinishSave",
       "FinishRead",
       "Restart"
+    ],
+    "AssistantCredentialOwnership": [
+      "Edit",
+      "Switch",
+      "Dispatch",
+      "BeginWrite",
+      "SaveSuccess",
+      "SaveFailure",
+      "Retry",
+      "ReadBegin",
+      "ReadComplete"
+    ],
+    "MicrophoneAsyncOwnership": [
+      "TestBegin",
+      "TestComplete",
+      "Reconcile",
+      "Stop",
+      "Intent",
+      "StartComplete",
+      "Compensate"
+    ],
+    "HistoryLeaseInterleavings": [
+      "Acquire",
+      "Remove",
+      "BeginRelease",
+      "DeleteOne",
+      "DecrementMany",
+      "CommitRelease",
+      "Collect"
+    ],
+    "OutputDrainOwnership": [
+      "StartB",
+      "StartedB",
+      "CompleteA",
+      "ChangeTarget",
+      "ExitB",
+      "Drain"
+    ],
+    "IpcCommandDeadline": [
+      "Begin",
+      "Advance",
+      "Tick",
+      "Cancel",
+      "Reply"
+    ],
+    "MicrophoneEffectOwners": [
+      "BeginOne",
+      "RetireOne",
+      "MountTwo",
+      "SecondStart",
+      "FirstComplete",
+      "FirstCleanup"
+    ],
+    "ModelIntegrityRepair": [
+      "Provision",
+      "Inspect",
+      "RepairBegin",
+      "RepairComplete"
     ]
   },
   "negative": [
@@ -1848,6 +2029,109 @@
         "!.pendingTimeout = IF value > 0 THEN value ELSE 1"
       ],
       "invariant": "DisabledKeepsTimeout"
+    },
+    {
+      "name": "async-history-leases",
+      "model": "HistoryLeaseInterleavings",
+      "config": "HistoryLeaseInterleavingsNegative.cfg",
+      "invariant": "LeaseCountMatchesHolders"
+    },
+    {
+      "name": "async-assistant-key",
+      "model": "AssistantCredentialOwnership",
+      "config": "AssistantCredentialOwnershipNegative.cfg",
+      "invariant": "CapturedProviderReceivesKey"
+    },
+    {
+      "name": "async-assistant-read",
+      "model": "AssistantCredentialOwnership",
+      "config": "AssistantCredentialReadNegative.cfg",
+      "invariant": "OnlyLatestReadPublishes"
+    },
+    {
+      "name": "async-microphone",
+      "model": "MicrophoneAsyncOwnership",
+      "config": "MicrophoneAsyncOwnershipNegative.cfg",
+      "invariant": "SettledMonitorHonorsIntent"
+    },
+    {
+      "name": "async-microphone-test-owner",
+      "model": "MicrophoneAsyncOwnership",
+      "config": "MicrophoneTestOwnerNegative.cfg",
+      "invariant": "OlderTestCannotResume"
+    },
+    {
+      "name": "async-output-drain",
+      "model": "OutputDrainOwnership",
+      "config": "OutputDrainOwnershipNegative.cfg",
+      "invariant": "IdlePendingHasScheduledDrain"
+    },
+    {
+      "name": "async-output-success",
+      "model": "OutputDrainOwnership",
+      "config": "OutputSuccessDrainNegative.cfg",
+      "invariant": "IdlePendingHasScheduledDrain"
+    },
+    {
+      "name": "async-output-start-error",
+      "model": "OutputDrainOwnership",
+      "config": "OutputStartErrorNegative.cfg",
+      "invariant": "IdlePendingHasScheduledDrain"
+    },
+    {
+      "name": "async-output-target",
+      "model": "OutputDrainOwnership",
+      "config": "OutputTargetOwnershipNegative.cfg",
+      "invariant": "ChangedTargetNeverBlindPastes"
+    },
+    {
+      "name": "async-ipc-deadline",
+      "model": "IpcCommandDeadline",
+      "config": "IpcCommandDeadlineNegative.cfg",
+      "invariant": "OneTotalDeadline"
+    },
+    {
+      "name": "async-ipc-write-deadline",
+      "model": "IpcCommandDeadline",
+      "config": "IpcWriteDeadlineNegative.cfg",
+      "invariant": "OneTotalDeadline"
+    },
+    {
+      "name": "async-ipc-cancel",
+      "model": "IpcCommandDeadline",
+      "config": "IpcCancellationNegative.cfg",
+      "invariant": "InvalidFrameCannotBeReused"
+    },
+    {
+      "name": "async-microphone-effect-owner",
+      "model": "MicrophoneEffectOwners",
+      "config": "MicrophoneEffectOwnersNegative.cfg",
+      "invariant": "RetiredEffectCannotStopReplacement"
+    },
+    {
+      "name": "async-microphone-retired-test",
+      "model": "MicrophoneEffectOwners",
+      "config": "MicrophoneRetiredTestNegative.cfg",
+      "invariant": "RetiredEffectCannotStopReplacement"
+    },
+    {
+      "name": "async-model-integrity",
+      "model": "ModelIntegrityRepair",
+      "config": "ModelIntegrityRepairNegative.cfg",
+      "invariant": "CorruptAlwaysOffersRepair"
+    },
+    {
+      "name": "async-model-repair",
+      "model": "ModelIntegrityRepair",
+      "config": "ModelIntegrityRepairTrace.cfg",
+      "invariant": "RepairPathNotReached",
+      "purpose": "Positive repair-path reachability witness for replay generation; not a safety negative or proof."
+    },
+    {
+      "name": "async-assistant-saved-read",
+      "model": "AssistantCredentialOwnership",
+      "config": "AssistantCredentialSavedReadNegative.cfg",
+      "invariant": "OnlyLatestReadPublishes"
     }
   ],
   "command_implementation": {

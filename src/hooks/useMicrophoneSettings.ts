@@ -24,6 +24,10 @@ interface UseMicrophoneSettingsOptions {
   isRecording: boolean;
 }
 
+// The native monitor is shared by every settings-page instance.
+let monitorOwner: symbol | null = null;
+let monitorQueue = Promise.resolve();
+
 export function useMicrophoneSettings({
   active,
   closePicker,
@@ -40,6 +44,51 @@ export function useMicrophoneSettings({
   const [micLevelMonitorEnabled, setMicLevelMonitorEnabled] = useState(
     () => readLocalStorage(MIC_LEVEL_MONITOR_ENABLED_KEY) === "true",
   );
+  const mountedRef = useRef(true);
+  const intentRef = useRef({ active, isRecording, enabled: micLevelMonitorEnabled });
+  intentRef.current = { active, isRecording, enabled: micLevelMonitorEnabled };
+  const monitorGenerationRef = useRef(0);
+  const ownerRef = useRef(Symbol("microphone-settings"));
+  const testGenerationRef = useRef(0);
+  const pendingTestRef = useRef<number | null>(null);
+
+  const reconcileMonitor = useCallback((resume = true) => {
+    if (monitorOwner !== ownerRef.current) return Promise.resolve();
+    const generation = ++monitorGenerationRef.current;
+    if (mountedRef.current) {
+      setMicMonitorReady(false);
+      setMicLevel(0);
+    }
+    const allowed = () => {
+      const intent = intentRef.current;
+      return resume && mountedRef.current && monitorOwner === ownerRef.current
+        && generation === monitorGenerationRef.current
+        && intent.active && intent.enabled && !intent.isRecording && pendingTestRef.current === null;
+    };
+    const operation = monitorQueue.then(async () => {
+      if (monitorOwner !== ownerRef.current || generation !== monitorGenerationRef.current) return;
+      await stopMicrophoneLevelMonitor().catch(() => undefined);
+      if (!allowed()) return;
+      try {
+        await startMicrophoneLevelMonitor();
+        if (allowed()) setMicMonitorReady(true);
+        else await stopMicrophoneLevelMonitor().catch(() => undefined);
+      } catch {
+        // A later intent owns readiness; this operation already cleared its own state.
+      }
+    });
+    monitorQueue = operation;
+    return operation;
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    monitorOwner = ownerRef.current;
+    return () => {
+      mountedRef.current = false;
+      void reconcileMonitor(false);
+    };
+  }, [reconcileMonitor]);
 
   const refreshInputDevices = useCallback(async () => {
     setDeviceListLoading(true);
@@ -68,31 +117,13 @@ export function useMicrophoneSettings({
     let disposed = false;
     let unlisten: null | (() => void) = null;
 
-    const startMonitor = async () => {
-      try {
-        if (disposed) return;
-        await stopMicrophoneLevelMonitor().catch(() => undefined);
-        if (disposed || !active || !micLevelMonitorEnabled || isRecording) {
-          if (!disposed) {
-            setMicMonitorReady(false);
-            setMicLevel(0);
-          }
-          return;
-        }
-        await startMicrophoneLevelMonitor();
-        if (!disposed) setMicMonitorReady(true);
-      } catch {
-        if (!disposed) {
-          setMicMonitorReady(false);
-          setMicLevel(0);
-        }
-      }
-    };
-
     void (async () => {
       try {
         unlisten = await listen<MicrophoneLevelPayload>("microphone-level", (event) => {
-          if (disposed) return;
+          const intent = intentRef.current;
+          if (disposed || !mountedRef.current || monitorOwner !== ownerRef.current
+            || !intent.active || !intent.enabled
+            || intent.isRecording || pendingTestRef.current !== null) return;
           const level = typeof event.payload?.level === "number" ? event.payload.level : 0;
           setMicLevel(Math.max(0, Math.min(1, level)));
         });
@@ -100,20 +131,19 @@ export function useMicrophoneSettings({
         // Ignore event subscription failures and keep the controls usable.
       }
 
-      await startMonitor();
-
       if (disposed && unlisten) {
         unlisten();
         unlisten = null;
       }
+      if (!disposed) await reconcileMonitor();
     })();
 
     return () => {
       disposed = true;
       unlisten?.();
-      void stopMicrophoneLevelMonitor().catch(() => undefined);
+      void reconcileMonitor(false);
     };
-  }, [active, isRecording, micLevelMonitorEnabled, selectedInputDeviceName]);
+  }, [active, isRecording, micLevelMonitorEnabled, selectedInputDeviceName, reconcileMonitor]);
 
   const handleInputDeviceChange = useCallback(async (name: string) => {
     closePicker();
@@ -131,6 +161,7 @@ export function useMicrophoneSettings({
   }, [closePicker, refreshInputDevices, t]);
 
   const handleMicLevelMonitorToggle = useCallback((enabled: boolean) => {
+    intentRef.current.enabled = enabled;
     setMicLevelMonitorEnabled(enabled);
     writeLocalStorage(MIC_LEVEL_MONITOR_ENABLED_KEY, enabled ? "true" : "false");
     if (!enabled) {
@@ -140,20 +171,24 @@ export function useMicrophoneSettings({
   }, []);
 
   const handleTestMicrophone = useCallback(async () => {
+    const generation = ++testGenerationRef.current;
+    pendingTestRef.current = generation;
+    const current = () => mountedRef.current && monitorOwner === ownerRef.current
+      && pendingTestRef.current === generation;
     try {
-      setMicMonitorReady(false);
-      setMicLevel(0);
-      await stopMicrophoneLevelMonitor().catch(() => undefined);
+      await reconcileMonitor(false);
+      if (!mountedRef.current || monitorOwner !== ownerRef.current) return;
       const message = await testMicrophone();
-      toast.success(message);
-      if (micLevelMonitorEnabled && !isRecording) {
-        await startMicrophoneLevelMonitor();
-        setMicMonitorReady(true);
-      }
+      if (current()) toast.success(message);
     } catch {
-      toast.error(t("toast.micTestFailed"));
+      if (current()) toast.error(tRef.current("toast.micTestFailed"));
+    } finally {
+      if (pendingTestRef.current === generation) {
+        pendingTestRef.current = null;
+        await reconcileMonitor();
+      }
     }
-  }, [isRecording, micLevelMonitorEnabled, t]);
+  }, [reconcileMonitor]);
 
   return {
     deviceListLoading,

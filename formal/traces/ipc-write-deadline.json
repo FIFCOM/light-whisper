@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/IpcCommandDeadline.tla",
+  "config": "formal/IpcWriteDeadlineNegative.cfg",
+  "model_sha256": "ec0251de633c07fdb6dcf6fe4519c5e5e0e8b88043ca668a0e6ad9440ea5fc29",
+  "config_sha256": "c7d21e011f18c428f99427a0b151cb35890c1c09c3a6d934f9524dec8697676d",
+  "counterexample": "formal/traces/ipc-write-deadline.tlc.txt",
+  "counterexample_sha256": "90636c34816813edb6561970565b6d45c8322ad33d8ffd18a2fdc2a082ca2517",
+  "violated_invariant": "OneTotalDeadline",
+  "events": [
+    "ipc:begin",
+    "ipc:tick",
+    "ipc:tick",
+    "ipc:tick"
+  ]
+}

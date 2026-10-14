@@ -98,7 +98,7 @@ fn selection_context_matches(
 }
 
 #[cfg(target_os = "windows")]
-fn foreground_window_id() -> Option<isize> {
+pub(crate) fn foreground_window_id() -> Option<isize> {
     use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     let window = unsafe { GetForegroundWindow() };
@@ -106,7 +106,7 @@ fn foreground_window_id() -> Option<isize> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn foreground_window_id() -> Option<isize> {
+pub(crate) fn foreground_window_id() -> Option<isize> {
     None
 }
 

@@ -1,0 +1,35 @@
+Error: Invariant CorruptAlwaysOffersRepair is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lastEvent = "init"
+/\ s = [ fixture |-> FALSE,
+  manifest |-> "absent",
+  large |-> FALSE,
+  inspected |-> FALSE,
+  status |-> "unknown",
+  repair |-> FALSE,
+  phase |-> "idle",
+  repaired |-> FALSE ]
+
+State 2: <Provision line 12, col 3 to line 15, col 42 of module ModelIntegrityRepair>
+/\ lastEvent = "cache:fixture:invalid"
+/\ s = [ fixture |-> TRUE,
+  manifest |-> "invalid",
+  large |-> TRUE,
+  inspected |-> FALSE,
+  status |-> "unknown",
+  repair |-> FALSE,
+  phase |-> "idle",
+  repaired |-> FALSE ]
+
+State 3: <Inspect line 17, col 3 to line 21, col 33 of module ModelIntegrityRepair>
+/\ lastEvent = "cache:inspect"
+/\ s = [ fixture |-> TRUE,
+  manifest |-> "invalid",
+  large |-> TRUE,
+  inspected |-> TRUE,
+  status |-> "ready",
+  repair |-> FALSE,
+  phase |-> "idle",
+  repaired |-> FALSE ]
+

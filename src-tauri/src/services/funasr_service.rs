@@ -22,6 +22,8 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -91,6 +93,16 @@ pub struct FunASRStatus {
     pub models_present: Option<bool>,
     /// 缺失模型列表
     pub missing_models: Option<Vec<String>>,
+    pub model_state: Option<ModelState>,
+    pub corrupt_models: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelState {
+    Ready,
+    Missing,
+    Corrupt,
 }
 
 /// 模型文件检查结果
@@ -110,6 +122,8 @@ pub struct ModelCheckResult {
     pub cache_path: String,
     /// 缺失的模型列表
     pub missing_models: Vec<String>,
+    pub model_state: ModelState,
+    pub corrupt_models: Vec<String>,
 }
 
 const QWEN3_ASR_06_REPO_ID: &str = "handy-computer/Qwen3-ASR-0.6B-gguf";
@@ -248,6 +262,8 @@ fn status_with_defaults(
         engine: None,
         models_present: None,
         missing_models: None,
+        model_state: None,
+        corrupt_models: None,
     }
 }
 
@@ -256,15 +272,15 @@ fn report_model_repo_file_state(
     required_file: Option<&str>,
     description: &str,
     missing_models: &mut Vec<String>,
-) -> bool {
-    let present = is_hf_repo_ready(repo_id, required_file);
-    if present {
-        log::info!("模型文件已就位: {} ({})", description, repo_id);
-    } else {
-        log::warn!("模型文件缺失: {} ({})", description, repo_id);
-        missing_models.push(description.to_string());
+    corrupt_models: &mut Vec<String>,
+) -> ModelState {
+    let model_state = hf_repo_model_state(repo_id, required_file);
+    match model_state {
+        ModelState::Ready => log::info!("模型文件已就位: {} ({})", description, repo_id),
+        ModelState::Missing => missing_models.push(description.to_string()),
+        ModelState::Corrupt => corrupt_models.push(description.to_string()),
     }
-    present
+    model_state
 }
 
 // ============================================================
@@ -491,6 +507,8 @@ pub async fn start_server(app_handle: &tauri::AppHandle, state: &AppState) -> Re
             "gpu_name": response.gpu_name,
             "models_present": true,
             "missing_models": [],
+            "model_state": "ready",
+            "corrupt_models": [],
         });
         let _lifecycle_guard = state.engine.funasr_lifecycle_op.lock().await;
         if !start_ticket_is_current(state, &ticket) {
@@ -794,7 +812,7 @@ async fn transcribe_pcm16_via_path(
 /// 这是与 Python 进程通信的核心函数。
 ///
 /// # 通信流程
-/// 1. 从全局状态中取出子进程（释放锁）
+/// 1. 持有进程锁，从全局状态中取出子进程
 /// 2. 将命令序列化为 JSON
 /// 3. 通过 stdin 写入 JSON + 换行符
 /// 4. 从 stdout 读取一行 JSON 响应
@@ -811,24 +829,32 @@ async fn send_command_to_server<R: tauri::Runtime>(
     command: &ServerCommand,
     app_handle: Option<&tauri::AppHandle<R>>,
 ) -> Result<ServerResponse, AppError> {
-    let mut guard = state.engine.funasr_process.lock().await;
+    send_command_to_server_with_timeout(
+        state,
+        command,
+        app_handle,
+        Duration::from_secs(SERVER_RESPONSE_TIMEOUT_SECS),
+    )
+    .await
+}
 
-    let result = {
-        let process = guard
-            .as_mut()
-            .ok_or_else(|| AppError::Asr("FunASR 进程未运行".to_string()))?;
-        send_command_impl(process, command).await
-    };
+// The process stays outside the shared slot until its complete reply arrives.
+// Cancellation can leave a partial JSON frame, so only success restores it.
+struct CommandProcessGuard<'a, R: tauri::Runtime> {
+    state: &'a AppState,
+    app_handle: Option<&'a tauri::AppHandle<R>>,
+    process: Option<FunasrProcess>,
+}
 
-    if let Err(error) = &result {
-        // A broken pipe/EOF/timeout makes this IPC session unusable even if
-        // the child has not exited yet (e.g. after sleep). Dropping the handle
-        // also requests termination of the stale child.
-        log::warn!("FunASR 通信失效，释放进程并准备重启: {}", error);
-        state.set_funasr_ready(false);
-        state.set_inline_audio_transport(None);
-        *guard = None;
-        if let Some(handle) = app_handle {
+impl<R: tauri::Runtime> Drop for CommandProcessGuard<'_, R> {
+    fn drop(&mut self) {
+        if self.process.is_none() {
+            return;
+        }
+        log::warn!("FunASR 通信中断，释放进程并准备重启");
+        self.state.set_funasr_ready(false);
+        self.state.set_inline_audio_transport(None);
+        if let Some(handle) = self.app_handle {
             let _ = handle.emit(
                 "funasr-status",
                 serde_json::json!({
@@ -838,14 +864,39 @@ async fn send_command_to_server<R: tauri::Runtime>(
             );
         }
     }
+}
 
-    result
+async fn send_command_to_server_with_timeout<R: tauri::Runtime>(
+    state: &AppState,
+    command: &ServerCommand,
+    app_handle: Option<&tauri::AppHandle<R>>,
+    timeout: Duration,
+) -> Result<ServerResponse, AppError> {
+    // One budget covers waiting for the lock, write, flush, and the reply.
+    tokio::time::timeout(timeout, async {
+        let mut guard = state.engine.funasr_process.lock().await;
+        let process = guard
+            .take()
+            .ok_or_else(|| AppError::Asr("FunASR 进程未运行".to_string()))?;
+        let mut owned = CommandProcessGuard {
+            state,
+            app_handle,
+            process: Some(process),
+        };
+        let result = send_command_impl(owned.process.as_mut().unwrap(), command).await;
+        if result.is_ok() {
+            // A valid application error is still a healthy transport reply.
+            *guard = owned.process.take();
+        }
+        result
+    })
+    .await
+    .map_err(|_| AppError::Asr("等待 FunASR 命令完成超时".to_string()))?
 }
 
 /// 向子进程发送命令并读取响应的内部实现
 ///
-/// 把实际的 I/O 操作分离出来，这样 `send_command_to_server` 可以
-/// 在锁释放后安全地调用这个异步函数。
+/// 调用方在整个 I/O 期间持有进程锁和取消守卫。
 async fn send_command_impl(
     process: &mut FunasrProcess,
     command: &ServerCommand,
@@ -992,6 +1043,8 @@ pub async fn check_status(
                 engine: Some(engine),
                 models_present: Some(true),
                 missing_models: Some(Vec::new()),
+                model_state: Some(ModelState::Ready),
+                corrupt_models: Some(Vec::new()),
             });
         }
 
@@ -1006,14 +1059,16 @@ pub async fn check_status(
         }
         let model_check = inspect_model_files_for_engine(&engine);
         return Ok(FunASRStatus {
-            message: if model_check.all_present {
-                "FunASR 服务器未运行".to_string()
-            } else {
-                "模型文件未下载，请先下载模型".to_string()
+            message: match model_check.model_state {
+                ModelState::Ready => "FunASR 服务器未运行".to_string(),
+                ModelState::Missing => "模型文件未下载，请先下载模型".to_string(),
+                ModelState::Corrupt => "模型文件校验失败，请修复模型".to_string(),
             },
             engine: Some(engine),
             models_present: Some(model_check.all_present),
             missing_models: Some(model_check.missing_models.clone()),
+            model_state: Some(model_check.model_state),
+            corrupt_models: Some(model_check.corrupt_models.clone()),
             ..status_with_defaults(false, false, false, String::new())
         });
     }
@@ -1045,6 +1100,8 @@ pub async fn check_status(
                 engine: response.engine,
                 models_present: Some(true),
                 missing_models: Some(Vec::new()),
+                model_state: Some(ModelState::Ready),
+                corrupt_models: Some(Vec::new()),
             })
         }
         Err(e) => {
@@ -1137,7 +1194,12 @@ fn get_hf_cache_root() -> PathBuf {
 ///
 /// 仅检查目录结构不够——下载中途取消会留下空壳目录（refs/snapshots 存在但无权重文件），
 /// 导致后续加载卡死。这里额外验证 snapshots 中存在 >1MB 的模型权重文件（.pt/.bin/.safetensors/.onnx）。
+#[cfg(test)]
 fn is_hf_repo_ready(repo_id: &str, required_file: Option<&str>) -> bool {
+    hf_repo_model_state(repo_id, required_file) == ModelState::Ready
+}
+
+fn hf_repo_model_state(repo_id: &str, required_file: Option<&str>) -> ModelState {
     let cache_root = get_hf_cache_root();
     let dir_name = format!("models--{}", repo_id.replace('/', "--"));
     let repo_dir = cache_root.join(&dir_name);
@@ -1150,9 +1212,10 @@ fn is_hf_repo_ready(repo_id: &str, required_file: Option<&str>) -> bool {
         repo_dir.is_dir()
     );
 
-    if !repo_dir.is_dir() {
-        log::warn!("模型目录不存在: {}", repo_dir.display());
-        return false;
+    match std::fs::metadata(&repo_dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return ModelState::Missing,
+        _ => return ModelState::Corrupt,
     }
 
     let snapshots_dir = repo_dir.join("snapshots");
@@ -1164,32 +1227,71 @@ fn is_hf_repo_ready(repo_id: &str, required_file: Option<&str>) -> bool {
                 snapshots_dir.display(),
                 err
             );
-            return false;
+            return if snapshots_dir.exists() || err.kind() != std::io::ErrorKind::NotFound {
+                ModelState::Corrupt
+            } else {
+                ModelState::Missing
+            };
         }
     };
 
-    for entry in entries.filter_map(Result::ok) {
-        let snapshot_path = entry.path();
+    let mut snapshots = match entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(snapshots) => snapshots,
+        Err(_) => return ModelState::Corrupt,
+    };
+    snapshots.sort();
+    if let Ok(revision) = std::fs::read_to_string(repo_dir.join("refs/main")) {
+        if let Some(index) = snapshots.iter().position(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some(revision.trim())
+        }) {
+            let selected = snapshots.remove(index);
+            snapshots.insert(0, selected);
+        }
+    }
+    let mut model_state = ModelState::Missing;
+    for snapshot_path in snapshots {
+        model_state = ModelState::Corrupt;
         if !snapshot_path.is_dir() {
             continue;
         }
-        if required_file.is_some_and(|filename| !snapshot_path.join(filename).is_file()) {
+        if required_file.is_some_and(|filename| {
+            !std::fs::metadata(snapshot_path.join(filename))
+                .is_ok_and(|meta| meta.is_file() && meta.len() >= 1_000_000)
+        }) {
             continue;
         }
         log::info!("检查 snapshot: {}", snapshot_path.display());
-        if snapshot_matches_completion_manifest(&snapshot_path)
-            || snapshot_matches_legacy_weight_check(&snapshot_path)
-        {
+        let manifest_present = !matches!(
+            std::fs::symlink_metadata(snapshot_path.join(HF_COMPLETE_MANIFEST_NAME)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        );
+        let ready = if manifest_present {
+            snapshot_matches_completion_manifest_for_file(&snapshot_path, required_file)
+        } else {
+            snapshot_matches_legacy_weight_check(&snapshot_path)
+        };
+        if ready {
             log::info!("模型就绪: {} (在 {})", repo_id, snapshot_path.display());
-            return true;
+            return ModelState::Ready;
         }
     }
 
     log::warn!("模型未就绪: {} — 未找到完整下载清单或文件校验失败", repo_id);
-    false
+    model_state
 }
 
+#[cfg(test)]
 fn snapshot_matches_completion_manifest(snapshot_path: &std::path::Path) -> bool {
+    snapshot_matches_completion_manifest_for_file(snapshot_path, None)
+}
+
+fn snapshot_matches_completion_manifest_for_file(
+    snapshot_path: &std::path::Path,
+    required_file: Option<&str>,
+) -> bool {
     const MIN_SIZE: u64 = 1_000_000;
     let manifest_path = snapshot_path.join(HF_COMPLETE_MANIFEST_NAME);
     let data = match std::fs::read_to_string(&manifest_path) {
@@ -1214,6 +1316,7 @@ fn snapshot_matches_completion_manifest(snapshot_path: &std::path::Path) -> bool
         return false;
     };
     let mut has_weight = false;
+    let mut has_required_file = required_file.is_none();
     for item in files {
         let Some(rel_path) = item.get("path").and_then(|value| value.as_str()) else {
             return false;
@@ -1222,16 +1325,49 @@ fn snapshot_matches_completion_manifest(snapshot_path: &std::path::Path) -> bool
             return false;
         };
         let normalized = rel_path.replace('\\', "/");
-        if normalized.starts_with('/') || normalized.split('/').any(|part| part == "..") {
+        if normalized.is_empty()
+            || !std::path::Path::new(&normalized)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
             return false;
         }
         let path = snapshot_path.join(normalized);
         let actual_size = match std::fs::metadata(&path) {
-            Ok(meta) => meta.len(),
-            Err(_) => return false,
+            Ok(meta) if meta.is_file() => meta.len(),
+            _ => return false,
         };
         if actual_size != expected_size {
             return false;
+        }
+        match item.get("sha256") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(expected_hash)) => {
+                if expected_hash.len() != 64
+                    || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return false;
+                }
+                let Ok(mut file) = std::fs::File::open(&path) else {
+                    return false;
+                };
+                let mut hash = Sha256::new();
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(count) => hash.update(&buffer[..count]),
+                        Err(_) => return false,
+                    }
+                }
+                if !format!("{:x}", hash.finalize()).eq_ignore_ascii_case(expected_hash) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        if required_file == Some(rel_path) {
+            has_required_file = true;
         }
         if [".pt", ".bin", ".safetensors", ".onnx", ".gguf"]
             .iter()
@@ -1241,7 +1377,7 @@ fn snapshot_matches_completion_manifest(snapshot_path: &std::path::Path) -> bool
             has_weight = true;
         }
     }
-    has_weight
+    has_weight && has_required_file
 }
 
 fn snapshot_matches_legacy_weight_check(snapshot_path: &std::path::Path) -> bool {
@@ -1294,6 +1430,8 @@ fn inspect_model_files_for_engine(engine: &str) -> ModelCheckResult {
             engine: engine.to_string(),
             cache_path: String::new(),
             missing_models: Vec::new(),
+            model_state: ModelState::Ready,
+            corrupt_models: Vec::new(),
         };
     }
 
@@ -1316,8 +1454,15 @@ fn inspect_model_files_for_engine(engine: &str) -> ModelCheckResult {
         )
     };
     let mut missing_models = Vec::new();
-    let asr_present =
-        report_model_repo_file_state(repo_id, Some(filename), description, &mut missing_models);
+    let mut corrupt_models = Vec::new();
+    let model_state = report_model_repo_file_state(
+        repo_id,
+        Some(filename),
+        description,
+        &mut missing_models,
+        &mut corrupt_models,
+    );
+    let asr_present = model_state == ModelState::Ready;
 
     ModelCheckResult {
         all_present: asr_present,
@@ -1327,6 +1472,8 @@ fn inspect_model_files_for_engine(engine: &str) -> ModelCheckResult {
         engine: normalized_engine.to_string(),
         cache_path,
         missing_models,
+        model_state,
+        corrupt_models,
     }
 }
 
@@ -1660,5 +1807,175 @@ mod tests {
             b"old-engine"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod model_readiness_tests {
+    use sha2::{Digest, Sha256};
+
+    fn run_in_isolated_cache(test_name: &str) -> bool {
+        const CHILD_ENV: &str = "LIGHT_WHISPER_MODEL_READINESS_TEST_CHILD";
+        if std::env::var(CHILD_ENV).as_deref() == Ok(test_name) {
+            let cache = crate::utils::paths::get_data_dir().join("models");
+            crate::utils::paths::write_models_dir(Some(cache.to_str().unwrap())).unwrap();
+            return false;
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "light-whisper-model-readiness-{}-{nonce}",
+            std::process::id()
+        ));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env("LIGHT_WHISPER_DATA_DIR", &directory)
+            .env(CHILD_ENV, test_name)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    fn snapshot(repo_id: &str) -> std::path::PathBuf {
+        let path = super::get_hf_cache_root()
+            .join(format!("models--{}", repo_id.replace('/', "--")))
+            .join("snapshots/test-revision");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("model.gguf"), vec![0_u8; 1_000_001]).unwrap();
+        path
+    }
+
+    #[test]
+    fn model_repo_invalid_manifest_cannot_fall_back_to_large_legacy_weight() {
+        if run_in_isolated_cache(
+            "services::funasr_service::model_readiness_tests::model_repo_invalid_manifest_cannot_fall_back_to_large_legacy_weight",
+        ) {
+            return;
+        }
+        let digest = format!("{:x}", Sha256::digest(vec![0_u8; 1_000_001]));
+        let valid_weight = serde_json::json!({
+            "path": "model.gguf", "size": 1_000_001, "sha256": digest,
+        });
+        let cases = [
+            ("malformed", "{".to_string(), false),
+            (
+                "size-mismatch",
+                serde_json::json!({"files": [{"path": "model.gguf", "size": 1_000_002}]}).to_string(),
+                false,
+            ),
+            (
+                "hash-mismatch",
+                serde_json::json!({"files": [{"path": "model.gguf", "size": 1_000_001, "sha256": "0".repeat(64)}]}).to_string(),
+                false,
+            ),
+            (
+                "missing-listed-file",
+                serde_json::json!({"files": [valid_weight, {"path": "config.json", "size": 2}]}).to_string(),
+                false,
+            ),
+            (
+                "unlisted-required-file",
+                serde_json::json!({"files": [{"path": "other.gguf", "size": 1_000_001, "sha256": digest}]}).to_string(),
+                true,
+            ),
+        ];
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for (case, manifest, manifest_valid) in cases {
+            let repo_id = format!("test/{case}");
+            let path = snapshot(&repo_id);
+            if case == "unlisted-required-file" {
+                std::fs::copy(path.join("model.gguf"), path.join("other.gguf")).unwrap();
+            }
+            std::fs::write(path.join(super::HF_COMPLETE_MANIFEST_NAME), manifest).unwrap();
+            actual.push((
+                case,
+                super::snapshot_matches_completion_manifest(&path),
+                super::is_hf_repo_ready(&repo_id, Some("model.gguf")),
+            ));
+            expected.push((case, manifest_valid, false));
+        }
+        assert_eq!(
+            actual, expected,
+            "a present manifest is authoritative, including SHA256 and the selected file"
+        );
+    }
+
+    #[test]
+    fn model_repo_preserves_valid_manifest_and_no_manifest_legacy_cache() {
+        if run_in_isolated_cache(
+            "services::funasr_service::model_readiness_tests::model_repo_preserves_valid_manifest_and_no_manifest_legacy_cache",
+        ) {
+            return;
+        }
+        let legacy = snapshot("test/legacy");
+        assert!(!super::snapshot_matches_completion_manifest(&legacy));
+        assert!(super::is_hf_repo_ready("test/legacy", Some("model.gguf")));
+
+        let valid = snapshot("test/valid");
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(valid.join("model.gguf")).unwrap())
+        );
+        std::fs::write(
+            valid.join(super::HF_COMPLETE_MANIFEST_NAME),
+            serde_json::json!({"files": [{"path": "model.gguf", "size": 1_000_001, "sha256": digest}]}).to_string(),
+        )
+        .unwrap();
+        assert!(super::snapshot_matches_completion_manifest(&valid));
+        assert!(super::is_hf_repo_ready("test/valid", Some("model.gguf")));
+    }
+
+    #[test]
+    fn selected_model_status_distinguishes_missing_ready_and_corrupt() {
+        if run_in_isolated_cache(
+            "services::funasr_service::model_readiness_tests::selected_model_status_distinguishes_missing_ready_and_corrupt",
+        ) {
+            return;
+        }
+        let inspect = || {
+            serde_json::to_value(super::inspect_model_files_for_engine("qwen3-asr-0.6b")).unwrap()
+        };
+        let missing = inspect();
+        let selected = snapshot(super::QWEN3_ASR_06_REPO_ID);
+        std::fs::rename(
+            selected.join("model.gguf"),
+            selected.join(super::QWEN3_ASR_06_FILENAME),
+        )
+        .unwrap();
+        let ready = inspect();
+        std::fs::write(selected.join(super::HF_COMPLETE_MANIFEST_NAME), "{").unwrap();
+        let corrupt = inspect();
+
+        assert_eq!(
+            [
+                missing["model_state"].as_str(),
+                ready["model_state"].as_str(),
+                corrupt["model_state"].as_str(),
+            ],
+            [Some("missing"), Some("ready"), Some("corrupt")],
+            "serialized model state must preserve the reason recognition cannot start"
+        );
+        assert_eq!(missing["missing_models"].as_array().unwrap().len(), 1);
+        assert!(missing["corrupt_models"].as_array().unwrap().is_empty());
+        assert_eq!(ready["all_present"], true);
+        assert!(ready["missing_models"].as_array().unwrap().is_empty());
+        assert!(ready["corrupt_models"].as_array().unwrap().is_empty());
+        assert_eq!(corrupt["all_present"], false);
+        assert!(corrupt["missing_models"].as_array().unwrap().is_empty());
+        let corrupt_models = corrupt["corrupt_models"].as_array().unwrap();
+        assert_eq!(corrupt_models.len(), 1);
+        assert!(corrupt_models[0]
+            .as_str()
+            .is_some_and(|name| !name.is_empty()));
     }
 }

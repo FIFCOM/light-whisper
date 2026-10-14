@@ -54,6 +54,7 @@ function getStatusText(
       : (downloadMessage ?? t("status.downloadPreparing"));
   }
   if (stage === "need_download") return t("status.needDownload");
+  if (stage === "need_repair") return t("status.needRepair");
   if (stage === "loading") return downloadMessage || t("status.modelLoading");
   return t("status.preparing");
 }
@@ -85,7 +86,7 @@ export default function StatusIndicator({
             {getDeviceLabel(device, gpuName, t)}
           </span>
         )}
-        {!isReady && stage !== "need_download" && (
+        {!isReady && stage !== "need_download" && stage !== "need_repair" && (
           <span className="chip animate-fade-in">
             <Loader2 size={10} className="animate-spin" />
             {getChipLabel(stage, downloadMessage, t)}
@@ -103,9 +104,9 @@ export default function StatusIndicator({
         {getStatusText(isStarting, isRecording, isProcessing, isReady, stage, downloadProgress, downloadMessage, t)}
       </p>
 
-      {stage === "need_download" && !isDownloading && (
+      {(stage === "need_download" || stage === "need_repair") && !isDownloading && (
         <button onClick={() => downloadModels()} className="btn-primary btn-primary-sm" style={{ marginTop: 4 }}>
-          <Download size={12} /> {t("status.startDownload")}
+          <Download size={12} /> {t(stage === "need_repair" ? "status.repairModels" : "status.startDownload")}
         </button>
       )}
       {stage === "need_download" && isDownloading && (

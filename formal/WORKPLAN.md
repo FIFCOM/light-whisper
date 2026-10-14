@@ -44,6 +44,7 @@ machine-code refinement proof.
 | Validation | URL/length/path partitions, import errors, update version rules | IPC and external-data validation |
 | Credential publication | Phased storage/cache ownership, captured auth choices and account pairing | Web key setters/getters/startup, all LLM/catalog auth callers |
 | UI disposal/cancellation | Revoked timers, stale promise completion and retired listeners | Model download and recording hooks |
+| Async ownership and repair | Captured/dirty credentials, two test/effect owners, two lease holders, overlapping output, total IPC deadline, authoritative corrupt cache and repair | SettingsPage, useMicrophoneSettings, SQLite history, actual output controller, child-process IPC and cache/downloader trace replays |
 
 The verifier itself has eleven regression cases, including the CI/verifier TLC
 checksum pin comparison: a reachable predicate is not an

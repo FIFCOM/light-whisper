@@ -196,6 +196,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
         samples,
         interim_cache,
         foreground_app,
+        paste_target,
         edit_grab,
         ..
     } = session;
@@ -495,8 +496,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
                 if !result.is_empty() {
                     let app = app_handle.clone();
                     tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(PASTE_DELAY_MS)).await;
-                        do_paste(&app, &result).await;
+                        do_paste(&app, &result, session_id, paste_target).await;
                     });
                 } else {
                     flush_pending_paste(&app_handle);
@@ -827,8 +827,7 @@ pub async fn finalize_recording(app_handle: tauri::AppHandle, session: Recording
         if !text.is_empty() {
             let app = app_handle.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(PASTE_DELAY_MS)).await;
-                do_paste(&app, &text).await;
+                do_paste(&app, &text, session_id, paste_target).await;
             });
         } else {
             flush_pending_paste(&app_handle);
@@ -1003,6 +1002,7 @@ fn emit_done_with_timing(
     if mode != RecordingMode::Assistant || text.is_empty() {
         crate::commands::window::schedule_subtitle_hide(app, sid, show_gen, mode, delay);
     }
+    flush_pending_paste(app);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1074,6 +1074,7 @@ fn emit_terminal_outcome(
     outcome: RecordingOutcomeKind,
     detail: Option<&str>,
 ) {
+    flush_pending_paste(app);
     let snapshot = app
         .state::<AppState>()
         .recording
@@ -1124,43 +1125,109 @@ fn emit_recording_state_snapshot(
 
 // ---------- 粘贴逻辑 ----------
 
-fn flush_pending_paste(app: &tauri::AppHandle) {
-    let texts: Vec<String> = app
-        .state::<AppState>()
-        .recording
-        .pending_paste
-        .lock()
-        .drain(..)
-        .collect();
-    if texts.is_empty() {
-        return;
-    }
-    let combined: String = texts.into_iter().collect();
+pub(crate) fn flush_pending_paste(app: &tauri::AppHandle) {
     let app = app.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(PASTE_DELAY_MS)).await;
-        do_paste(&app, &combined).await;
+        let state = app.state::<AppState>();
+        let recoveries = drain_pending_pastes(
+            &state,
+            crate::services::selection_service::foreground_window_id,
+            |output| {
+                let app = app.clone();
+                let method = state.ui.input_method.lock().clone();
+                async move {
+                    crate::commands::clipboard::paste_text_to_target(
+                        &app,
+                        &output.text,
+                        &method,
+                        output.target_window,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                }
+            },
+        )
+        .await;
+        for (output, reason) in recoveries {
+            let _ = app.emit(
+                "paste-recovery",
+                serde_json::json!({
+                    "sessionId": output.session_id,
+                    "text": output.text,
+                    "reason": reason,
+                }),
+            );
+        }
     });
 }
 
-async fn do_paste(app: &tauri::AppHandle, text: &str) {
+/// Recording reservation shares this dispatch mutex; native focus and input
+/// remain sampled OS operations, and failures are returned for explicit recovery.
+pub(super) async fn drain_pending_pastes<F, Fut>(
+    state: &AppState,
+    current_window: impl Fn() -> Option<isize>,
+    paste: F,
+) -> Vec<(super::output::PendingPaste, &'static str)>
+where
+    F: Fn(super::output::PendingPaste) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let _dispatch = state.recording.paste_dispatch.lock().await;
+    let outputs = {
+        let recording = state.recording.recording.lock();
+        state
+            .recording
+            .pending_paste
+            .lock()
+            .take_if_idle(recording.is_some())
+    };
+    let mut recoveries = Vec::new();
+    for output in outputs {
+        let reason = if !output.target_matches(current_window()) {
+            Some(if output.target_window.is_none() {
+                "target_unknown"
+            } else {
+                "target_changed"
+            })
+        } else if let Err(error) = paste(output.clone()).await {
+            log::warn!("会话 {} 自动粘贴失败: {}", output.session_id, error);
+            Some(if output.target_matches(current_window()) {
+                "paste_failed"
+            } else {
+                "target_changed"
+            })
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            recoveries.push((output, reason));
+        }
+    }
+    recoveries
+}
+
+async fn do_paste(
+    app: &tauri::AppHandle,
+    text: &str,
+    session_id: u64,
+    target_window: Option<isize>,
+) {
     let state = app.state::<AppState>();
-    if state.recording.recording.lock().is_some() {
-        state.recording.pending_paste.lock().push(text.to_string());
-        log::info!("录音进行中，文本已加入待粘贴队列（{} 个字符）", text.len());
-        return;
+    {
+        let _recording = state.recording.recording.lock();
+        state
+            .recording
+            .pending_paste
+            .lock()
+            .push(super::output::PendingPaste {
+                session_id,
+                target_window,
+                text: text.to_string(),
+            });
     }
-
-    let mut full = String::new();
-    for t in state.recording.pending_paste.lock().drain(..) {
-        full.push_str(&t);
-    }
-    full.push_str(text);
-
-    let method = state.ui.input_method.lock().clone();
-    if let Err(e) = crate::commands::clipboard::paste_text_impl(app, &full, &method).await {
-        log::error!("自动粘贴失败: {}", e);
-    }
+    flush_pending_paste(app);
 }
 
 #[cfg(test)]
@@ -1259,7 +1326,7 @@ mod tests {
             .find("let polished = text != original;")
             .expect("dictation should resolve AI polish before pasting");
         let paste = dictation_branch
-            .find("do_paste(&app, &text).await")
+            .find("do_paste(&app, &text,")
             .expect("dictation should paste the final text");
 
         assert!(

@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import i18n from "@/i18n";
-import { startRecording as invokeStartRecording, stopRecording as invokeStopRecording } from "@/api/tauri";
+import { copyToClipboard, startRecording as invokeStartRecording, stopRecording as invokeStopRecording } from "@/api/tauri";
 import type {
   EditGrabStatus,
   HistoryItem,
@@ -99,6 +99,25 @@ export function useRecording(): UseRecordingReturn {
   const lastAuditWarningSessionRef = useRef(0);
   const lastAuditToastSessionRef = useRef(0);
   const [auditWarningSession, setAuditWarningSession] = useState<number | null>(null);
+
+  useTauriEvent<{ sessionId: number; text: string; reason: string }>("paste-recovery", (payload) => {
+    if (!Number.isSafeInteger(payload.sessionId) || payload.sessionId <= 0
+      || typeof payload.text !== "string" || payload.text.length === 0) return;
+    toast.warning(i18n.t("toast.pasteRecovery"), {
+      id: `paste-recovery-${payload.sessionId}`,
+      duration: Infinity,
+      action: {
+        label: i18n.t("common.copy"),
+        onClick: async () => {
+          try {
+            await copyToClipboard(payload.text);
+          } catch {
+            toast.error(i18n.t("toast.pasteRecoveryCopyFailed"));
+          }
+        },
+      },
+    });
+  });
 
   useTauriEvent<{ sessionId: number; status: string }>("jev-polish-audit", (payload) => {
     if (payload.status !== "possible_change" || !Number.isSafeInteger(payload.sessionId)

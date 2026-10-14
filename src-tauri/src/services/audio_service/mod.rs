@@ -98,6 +98,9 @@ mod native_capture_tests;
 #[cfg(test)]
 mod native_integration_tests;
 mod native_recording;
+pub(crate) mod output;
+#[cfg(test)]
+mod output_tests;
 mod resample;
 mod wav;
 #[cfg(target_os = "windows")]
@@ -109,6 +112,7 @@ mod windows_capture;
 // `use crate::services::audio_service::X` 在拆分前后语义相同。
 
 pub use capture::{list_input_devices_sync, spawn_audio_capture_thread, spawn_waveform_emitter};
+pub(crate) use finalize::flush_pending_paste;
 pub use finalize::{discard_recording, finalize_recording};
 pub use interim::spawn_interim_loop;
 pub use monitor::{

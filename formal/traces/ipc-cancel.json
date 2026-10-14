@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "generator": "TLC 1.7.4 counterexample",
+  "tlc_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model": "formal/IpcCommandDeadline.tla",
+  "config": "formal/IpcCancellationNegative.cfg",
+  "model_sha256": "ec0251de633c07fdb6dcf6fe4519c5e5e0e8b88043ca668a0e6ad9440ea5fc29",
+  "config_sha256": "01dd719e124120c7f4c370655f11b0b8816d3a3f8ced5931983a950cae013f66",
+  "counterexample": "formal/traces/ipc-cancel.tlc.txt",
+  "counterexample_sha256": "a21de47fdcc20ea0505f57a936e1687244750132830d78db7ff91475736c8a99",
+  "violated_invariant": "InvalidFrameCannotBeReused",
+  "events": [
+    "ipc:begin",
+    "ipc:write:complete",
+    "ipc:cancel"
+  ]
+}
