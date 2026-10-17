@@ -38,7 +38,7 @@ Basic local dictation works without an LLM account. For rewriting, translation o
 
 | Engine | Processing | Setup |
 |:--|:--|:--|
-| **Qwen3-ASR 0.6B Q8** | Local · CUDA / Vulkan / CPU | Download ~850 MB; multilingual dictation. |
+| **Qwen3-ASR 0.6B Q8** | Local · CUDA / CPU | Download ~1.15 GB; multilingual dictation. |
 | **Confucius4-R2T2 Q8** | Local · CUDA / CPU | Download ~2.48 GB; native streaming with language and topic hints. |
 | **GLM-ASR** | Cloud · final results | API key and region. |
 | **Alibaba DashScope** | Cloud · final results | API key, region and model. |
@@ -50,7 +50,7 @@ Both local engines run on Windows without WSL. Models download separately and ar
 
 AI polish and the assistant can share a model or use separate providers and models. Presets include OpenAI, xAI, DeepSeek, Cerebras and SiliconFlow; custom providers support OpenAI-compatible and Anthropic formats. ChatGPT browser sign-in uses OpenAI's official local open-source app authorization and public Responses API; the account picker can reauthorize saved accounts and workspaces. Codex device-code sign-in remains available for compatibility. Grok Build account login uses the official CLI proxy. Model choices come from the authenticated upstream catalog, and account access and limits still apply. Subscription requests never fall back to a manually configured API key. Authentication failures refresh once; permission and exhausted-quota errors stop transport fallbacks.
 
-AI polish, screen context and assistant web search each offer **Off / On / Auto**. Only Auto uses the selected decision model to decide whether the work is needed. Under **Settings → Decision model**, choose **JEV** through TypeSafe (official), OpenRouter or Vercel, or Liquid AI's **d1:free**. Missing credentials, timeouts or uncertain decisions fall back to the usual processing path; the decision model does not generate replacement text, and translation and explicit edits still run.
+AI polish, screen context and assistant web search each offer **Off / On / Auto**. Only Auto uses the selected decision model to decide whether the work is needed. Under **Settings → Decision model**, choose TypeSafe (official), OpenRouter, Vercel, Liquid AI or a custom decision API, then configure its API key, URL and model name. Missing credentials, timeouts or uncertain decisions fall back to the usual processing path; the decision model does not generate replacement text, and translation and explicit edits still run.
 
 Auto polish skips processing at an 80% pass probability. When automatic screen context is enabled, an 80% `unneeded` screen decision is also required. Service errors fall back to normal polishing and are recorded in `app.log`.
 
@@ -64,6 +64,8 @@ Search options include provider-native search where supported, keyless Bing snip
 <summary><strong>Upgrading from before 1.6</strong></summary>
 
 Saved Qwen 1.7B selections migrate to R2T2, which needs its own model download. Qwen 0.6B and existing model caches are preserved. R2T2 has a separate [model license](src-tauri/resources/R2T2-MODEL-LICENSE.txt).
+
+Version 1.7.7 moves Qwen 0.6B to the shared audio.cpp runtime and requires a new ~1.15 GB GGUF download. Existing model caches remain intact. Both local engines support CPU and NVIDIA CUDA.
 
 </details>
 
@@ -102,6 +104,6 @@ See the [Code signing policy](docs/code-signing.md).
 
 [Build & troubleshoot](docs/development.md) · [Release procedure](docs/releasing.md) · [R2T2 backend](docs/r2t2-native.md) · [Formal verification](formal/README.md)
 
-Built with Tauri, React and Rust, using Qwen3-ASR / transcribe.cpp, Confucius4-R2T2 / audio.cpp and FireRedVAD.
+Built with Tauri, React and Rust, using Qwen3-ASR and Confucius4-R2T2 through audio.cpp, plus FireRedVAD.
 
 Light-Whisper is open-source software under [GPL-3.0-only](LICENSE). Third-party code and models retain their own terms; see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

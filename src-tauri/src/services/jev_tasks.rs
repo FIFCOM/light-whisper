@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::services::jev_service::JevProvider;
+use crate::state::user_profile::JevConfig;
 use reqwest::Client;
 use serde_json::{Map, Value};
 
@@ -278,13 +278,14 @@ pub fn confident_choice(
 /// Evaluate one generic Jev task, failing closed on all transport or payload errors.
 pub async fn evaluate(
     client: &Client,
-    provider: JevProvider,
+    config: &JevConfig,
     api_key: &str,
     state: Value,
     questions: Value,
     deadline: Duration,
     endpoint_override: Option<&str>,
 ) -> Option<Value> {
+    let provider = config.provider;
     let started = Instant::now();
     if api_key.trim().is_empty()
         || questions
@@ -296,7 +297,7 @@ pub async fn evaluate(
 
     let request = match crate::services::jev_service::build_evaluation_request(
         client,
-        provider,
+        config,
         api_key,
         state,
         questions,

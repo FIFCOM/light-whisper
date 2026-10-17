@@ -2,14 +2,6 @@ import type { RecordingMode } from "./generated/ipc";
 
 export type { InputDeviceInfo, InputDeviceListPayload, RecordingMode } from "./generated/ipc";
 
-// 与 Rust 后端 funasr_service::TranscriptionResult 对应
-export interface TranscriptionResult {
-  text: string;
-  duration?: number;
-  success: boolean;
-  error?: string;
-}
-
 export type EditGrabStatus = "ok" | "timeout" | "empty" | "unsupported";
 
 export interface TranscriptionTiming {
@@ -30,19 +22,6 @@ export interface FunASRStatus {
   engine?: string;
   models_present?: boolean;
   missing_models?: string[];
-  model_state?: "ready" | "missing" | "corrupt";
-  corrupt_models?: string[];
-}
-
-// 与 Rust 后端 funasr_service::ModelCheckResult 对应
-export interface ModelCheckResult {
-  all_present: boolean;
-  asr_model: boolean;
-  vad_model: boolean;
-  punc_model: boolean;
-  engine?: string;
-  cache_path: string;
-  missing_models: string[];
   model_state?: "ready" | "missing" | "corrupt";
   corrupt_models?: string[];
 }
@@ -163,11 +142,17 @@ export interface WebSearchConfig {
 
 // API 协议格式
 export type ApiFormat = "openai_compat" | "anthropic";
-export type JevProvider = "typesafe" | "openrouter" | "vercel" | "liquid";
+export type JevProvider = "typesafe" | "openrouter" | "vercel" | "liquid" | "custom";
+
+export interface JevConnection {
+  base_url: string;
+  model: string;
+}
 
 export interface JevConfig {
   enabled: boolean;
   provider: JevProvider;
+  connections?: Partial<Record<JevProvider, JevConnection>>;
   screen_routing?: boolean;
   correction_review?: boolean;
   search_routing?: boolean;

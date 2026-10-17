@@ -209,6 +209,14 @@
       "preferences",
       "routing"
     ],
+    "commands::jev::get_jev_connection": [
+      "preferences",
+      "routing"
+    ],
+    "commands::jev::set_jev_connection": [
+      "preferences",
+      "routing"
+    ],
     "commands::jev::set_polish_mode": [
       "preferences",
       "routing"
@@ -1400,6 +1408,7 @@
       },
       "implementation": [
         "src-tauri/resources/server_common.py#_gpu_idle_tick",
+        "src-tauri/resources/asr_stream_server.py#_gpu_idle_stream_active",
         "src-tauri/resources/qwen3_asr_server.py#_suspend_gpu_runtime",
         "src-tauri/resources/r2t2_asr_server.py#_suspend_gpu_runtime",
         "src-tauri/src/services/funasr_service.rs#push_gpu_idle_seconds",
@@ -1410,11 +1419,12 @@
         "src-tauri/resources/test_gpu_idle.py#test_enabling_after_use_starts_a_fresh_idle_window",
         "src-tauri/resources/test_qwen3_asr_server.py#test_idle_unload_closes_runtime_and_keeps_vad",
         "src-tauri/resources/test_r2t2_asr_server.py#test_idle_unload_drops_native_pointers_unless_stream_is_active",
+        "src-tauri/resources/test_shared_asr_stream.py#test_gpu_idle_activity_tracks_real_session_lifetime",
         "src/components/settings/GpuIdleUnloadControl.test.tsx",
         "src-tauri/src/utils/paths.rs#fn gpu_idle_timeout_survives_disable_and_restart(",
         "formal/lean/StateContracts.lean#gpuMayUnload"
       ],
-      "assumptions": "Monotonic time and weakly fair timer/command completion; finite clocks in TLC and unbounded Nat policy in Lean. Native load/free success is an input, not a driver proof. AppWorkflow GpuIdle represents R2T2 recording as an active stream. Input focus/click ordering is checked by real user-event regression tests; linguistic accuracy is outside proof."
+      "assumptions": "Monotonic time and weakly fair timer/command completion; finite clocks in TLC and unbounded Nat policy in Lean. Native load/free success is an input, not a driver proof. AppWorkflow GpuIdle represents Qwen 0.6B and R2T2 recording as an active stream. Input focus/click ordering is checked by real user-event regression tests; linguistic accuracy is outside proof."
     }
   },
   "runs": {
@@ -2197,6 +2207,8 @@
     "commands::ai_polish::list_ai_models": "src-tauri/src/commands/ai_polish.rs#fn list_ai_models(",
     "commands::jev::set_jev_config": "src-tauri/src/commands/jev.rs#fn set_jev_config(",
     "commands::jev::set_jev_provider": "src-tauri/src/commands/jev.rs#fn set_jev_provider(",
+    "commands::jev::get_jev_connection": "src-tauri/src/commands/jev.rs#fn get_jev_connection(",
+    "commands::jev::set_jev_connection": "src-tauri/src/commands/jev.rs#fn set_jev_connection(",
     "commands::jev::set_polish_mode": "src-tauri/src/commands/jev.rs#fn set_polish_mode(",
     "commands::jev::set_jev_features": "src-tauri/src/commands/jev.rs#fn set_jev_features(",
     "commands::jev::set_screen_context_mode": "src-tauri/src/commands/jev.rs#fn set_screen_context_mode(",

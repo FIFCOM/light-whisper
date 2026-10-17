@@ -15,10 +15,10 @@ import type {
   HotkeyDiagnostic,
   InputDeviceListPayload,
   JevProvider,
+  JevConnection,
   JevFeatures,
   LlmReasoningMode,
   LlmReasoningSupport,
-  ModelCheckResult,
   GrokBuildOauthDeviceCodeChallenge,
   GrokBuildOauthStatus,
   OpenaiAuthMode,
@@ -30,7 +30,6 @@ import type {
   PersistentHistoryRecord,
   PersistentHistoryStats,
   PolishStructureLevel,
-  TranscriptionResult,
   UserProfile,
   WebSearchProvider,
 } from "@/types";
@@ -103,16 +102,11 @@ function createNoArgCommand<T = string>(
 export const startFunASR = createNoArgCommand<string>("start_funasr");
 export const checkAppUpdate = createNoArgCommand<AppUpdateInfo>("check_app_update");
 
-export function transcribeAudio(audioBase64: string): Promise<TranscriptionResult> {
-  return invokeCommand<TranscriptionResult>("transcribe_audio", { audioBase64 });
-}
-
 export function openAppReleasePage(url?: string | null): Promise<string> {
   return invokeCommand<string>("open_app_release_page", { url: url ?? null });
 }
 
 export const checkFunASRStatus = createNoArgCommand<FunASRStatus>("check_funasr_status");
-export const checkModelFiles = createNoArgCommand<ModelCheckResult>("check_model_files");
 export const downloadModels = createNoArgCommand<string>("download_models");
 export const cancelModelDownload = createNoArgCommand<string>("cancel_model_download");
 export const restartFunASR = createNoArgCommand<string>("restart_funasr");
@@ -142,7 +136,6 @@ export function pasteText(
 }
 
 export const hideMainWindow = createNoArgCommand<string>("hide_main_window");
-export const showSubtitleWindow = createNoArgCommand<string>("show_subtitle_window");
 export const hideSubtitleWindow = createNoArgCommand<string>("hide_subtitle_window");
 export const getOpenaiCodexOauthStatus = createNoArgCommand<OpenaiCodexOauthStatus>("get_openai_codex_oauth_status");
 export function loginOpenaiCodexOauth(clientId?: string, newAccount = false): Promise<OpenaiCodexOauthStatus> {
@@ -168,14 +161,8 @@ export function completeGrokBuildOauthDeviceCode(
 }
 export const logoutGrokBuildOauth = createNoArgCommand<void>("logout_grok_build_oauth");
 
-export const unregisterAllHotkeys = createNoArgCommand<string>("unregister_all_hotkeys");
-
 export function registerCustomHotkey(shortcut: string): Promise<string> {
   return invokeCommand<string>("register_custom_hotkey", { shortcut });
-}
-
-export function registerAssistantHotkey(shortcut: string): Promise<string> {
-  return invokeCommand<string>("register_assistant_hotkey", { shortcut });
 }
 
 export const startRecording = createNoArgCommand<number>("start_recording");
@@ -206,16 +193,20 @@ export function getAiPolishApiKey(): Promise<string> {
   return invokeCommand<string>("get_ai_polish_api_key");
 }
 
-export function setJevConfig(enabled: boolean, provider: JevProvider): Promise<void> {
-  return invokeCommand<void>("set_jev_config", { enabled, provider });
-}
-
 export function saveAiPolishApiKey(apiKey: string): Promise<void> {
   return invokeCommand<void>("set_ai_polish_api_key", { apiKey });
 }
 
 export function setJevProvider(provider: JevProvider): Promise<void> {
   return invokeCommand<void>("set_jev_provider", { provider });
+}
+
+export function getJevConnection(provider: JevProvider): Promise<JevConnection> {
+  return invokeCommand<JevConnection>("get_jev_connection", { provider });
+}
+
+export function setJevConnection(provider: JevProvider, baseUrl: string, model: string): Promise<void> {
+  return invokeCommand<void>("set_jev_connection", { provider, baseUrl, model });
 }
 
 export function setJevFeatures(features: JevFeatures): Promise<void> {
@@ -246,14 +237,6 @@ export function getJevApiKey(provider: JevProvider): Promise<string> {
 
 export function setJevApiKey(provider: JevProvider, apiKey: string): Promise<void> {
   return invokeCommand<void>("set_jev_api_key", { provider, apiKey });
-}
-
-export function setAiPolishScreenContextEnabled(enabled: boolean): Promise<void> {
-  return invokeCommand<void>("set_ai_polish_screen_context_enabled", { enabled });
-}
-
-export function setScreenContextEnabled(enabled: boolean): Promise<void> {
-  return invokeCommand<void>("set_screen_context_enabled", { enabled });
 }
 
 export function listAiModels(
@@ -453,10 +436,6 @@ export function setAssistantSystemPrompt(prompt: string | null): Promise<void> {
   return invokeCommand<void>("set_assistant_system_prompt", { prompt });
 }
 
-export function setAssistantScreenContextEnabled(enabled: boolean): Promise<void> {
-  return invokeCommand<void>("set_assistant_screen_context_enabled", { enabled });
-}
-
 export function setSelectionAssistantConfig(params: {
   enabled: boolean;
   autoScreenshot: boolean;
@@ -582,22 +561,6 @@ export function addCustomProvider(
   apiFormat: "openai_compat" | "anthropic",
 ): Promise<string> {
   return invokeCommand<string>("add_custom_provider", { name, baseUrl, model, apiFormat });
-}
-
-export function updateCustomProvider(
-  id: string,
-  name?: string,
-  baseUrl?: string,
-  model?: string,
-  apiFormat?: "openai_compat" | "anthropic",
-): Promise<void> {
-  return invokeCommand<void>("update_custom_provider", {
-    id,
-    name: name ?? null,
-    baseUrl: baseUrl ?? null,
-    model: model ?? null,
-    apiFormat: apiFormat ?? null,
-  });
 }
 
 export function removeCustomProvider(id: string): Promise<void> {

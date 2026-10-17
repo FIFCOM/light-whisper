@@ -1,4 +1,4 @@
-//! Native streaming IPC client for the resident R2T2 server.
+//! Native streaming IPC client for the resident local ASR server.
 
 use super::{
     profile_hot_words, send_command_to_server, ServerCommand, ServerResponse, TranscriptionResult,
@@ -69,7 +69,7 @@ pub(super) fn validate_stream_response(
 }
 
 fn stream_error(message: &str) -> AppError {
-    AppError::Asr(format!("R2T2 stream error: {message}"))
+    AppError::Asr(format!("Native ASR stream error: {message}"))
 }
 
 pub(crate) struct NativeStreamClient {
@@ -187,7 +187,7 @@ impl NativeStreamClient {
             app,
         )
         .await;
-        let response = match response {
+        let mut response = match response {
             Ok(response) => response,
             Err(error) => {
                 self.closed = true;
@@ -195,7 +195,7 @@ impl NativeStreamClient {
             }
         };
         let update = match validate_stream_response(
-            response,
+            response.clone(),
             self.session_id,
             self.sample_count,
             true,
@@ -210,13 +210,11 @@ impl NativeStreamClient {
 
         self.apply_update(&update);
         self.closed = true;
-        Ok(TranscriptionResult {
-            text: self.committed_text.clone(),
-            duration: Some(self.sample_count as f64 / 16_000.0),
-            success: true,
-            error: None,
-            language: self.language.clone(),
-        })
+        response.duration = Some(self.sample_count as f64 / 16_000.0);
+        response.language = self.language.clone();
+        Ok(super::server_response_to_transcription_result(
+            state, response,
+        ))
     }
 
     pub(crate) async fn cancel(

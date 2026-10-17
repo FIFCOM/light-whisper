@@ -34,6 +34,8 @@ mod jev_service_tests;
 #[cfg(test)]
 mod jev_tasks_tests;
 #[cfg(test)]
+mod llm_endpoint_resolution_tests;
+#[cfg(test)]
 mod llm_reasoning_negotiation_tests;
 #[cfg(test)]
 mod openai_fast_mode_oauth_tests;

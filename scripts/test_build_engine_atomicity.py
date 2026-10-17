@@ -1,3 +1,4 @@
+import importlib.metadata
 import importlib.util
 import hashlib
 import io
@@ -36,13 +37,36 @@ class EngineArchiveSourceTests(unittest.TestCase):
         self.sources = {name: f"# {name}\nVALUE = 180\n".encode() for name in self.module.ADD_DATA_FILES}
         for name, source in self.sources.items():
             (self.root / name).write_bytes(source)
+        shared = b"synthetic shared CRT"
+        self.native_members = {"_internal/msvcp140.dll": shared}
+        for backend in ("cpu", "cuda"):
+            library = f"synthetic {backend} native library".encode()
+            prefix = f"_internal/r2t2-native/{backend}"
+            manifest = {
+                "build_id": self.module.R2T2_BUILD_ID,
+                "revision": self.module.R2T2_REVISION,
+                "patch_sha256": hashlib.sha256(self.module.R2T2_PATCH.read_bytes()).hexdigest(),
+                "backend": backend,
+                "files": {"audiocpp.dll": {
+                    "size": len(library), "sha256": hashlib.sha256(library).hexdigest(),
+                }},
+                "shared_files": {"msvcp140.dll": {
+                    "size": len(shared), "sha256": hashlib.sha256(shared).hexdigest(),
+                }},
+            }
+            self.native_members[f"{prefix}/audiocpp.dll"] = library
+            self.native_members[f"{prefix}/runtime-manifest.json"] = json.dumps(manifest).encode()
 
-    def package(self, sources):
+    def package(self, sources, *, native_members=None, extra_members=()):
+        members = {f"_internal/{name}": source for name, source in sources.items()}
+        members.update(self.native_members if native_members is None else native_members)
         with tarfile.open(self.archive, "w:xz") as archive:
-            for name, source in sources.items():
-                member = tarfile.TarInfo(f"_internal/{name}")
+            for name, source in members.items():
+                member = tarfile.TarInfo(name)
                 member.size = len(source)
                 archive.addfile(member, io.BytesIO(source))
+            for member, source in extra_members:
+                archive.addfile(member, None if source is None else io.BytesIO(source))
 
     def test_current_sources_pass_even_across_checkout_line_endings(self):
         self.package({name: source.replace(b"\n", b"\r\n") for name, source in self.sources.items()})
@@ -70,22 +94,94 @@ class EngineArchiveSourceTests(unittest.TestCase):
             self.module.verify_archive_sources(self.archive)
 
     def test_source_symlink_is_rejected(self):
-        with tarfile.open(self.archive, "w:xz") as archive:
-            member = tarfile.TarInfo("_internal/gpu_idle.py")
-            member.type = tarfile.SYMTYPE
-            member.linkname = "../../outside.py"
-            archive.addfile(member)
+        member = tarfile.TarInfo("_internal/gpu_idle.py")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "../../outside.py"
+        self.package(
+            {name: source for name, source in self.sources.items() if name != "gpu_idle.py"},
+            extra_members=[(member, None)],
+        )
         with self.assertRaisesRegex(RuntimeError, "Invalid bundled source: _internal/gpu_idle.py"):
             self.module.verify_archive_sources(self.archive)
 
     def test_duplicate_source_cannot_override_a_verified_file(self):
-        with tarfile.open(self.archive, "w:xz") as archive:
-            for source in (self.sources["gpu_idle.py"], b"VALUE = 0\n"):
-                member = tarfile.TarInfo("_internal/gpu_idle.py")
-                member.size = len(source)
-                archive.addfile(member, io.BytesIO(source))
+        source = b"VALUE = 0\n"
+        member = tarfile.TarInfo("_internal/gpu_idle.py")
+        member.size = len(source)
+        self.package(self.sources, extra_members=[(member, source)])
         with self.assertRaisesRegex(RuntimeError, "Invalid bundled source: _internal/gpu_idle.py"):
             self.module.verify_archive_sources(self.archive)
+
+    def test_current_native_runtimes_and_shared_files_pass(self):
+        self.package(self.sources)
+        self.module.verify_archive_sources(self.archive)
+
+    def test_wrong_native_provenance_or_backend_is_rejected(self):
+        for backend in ("cpu", "cuda"):
+            for field, stale in (
+                ("build_id", "light-whisper-r2t2-5"),
+                ("revision", "0" * 40),
+                ("patch_sha256", "0" * 64),
+                ("backend", "cuda" if backend == "cpu" else "cpu"),
+            ):
+                with self.subTest(backend=backend, field=field):
+                    name = f"_internal/r2t2-native/{backend}/runtime-manifest.json"
+                    manifest = json.loads(self.native_members[name])
+                    manifest[field] = stale
+                    self.package(self.sources, native_members={
+                        **self.native_members, name: json.dumps(manifest).encode(),
+                    })
+                    with self.assertRaises(RuntimeError):
+                        self.module.verify_archive_sources(self.archive)
+
+    def test_missing_native_manifest_or_library_is_rejected(self):
+        for backend in ("cpu", "cuda"):
+            for filename in ("runtime-manifest.json", "audiocpp.dll"):
+                with self.subTest(backend=backend, filename=filename):
+                    missing = f"_internal/r2t2-native/{backend}/{filename}"
+                    self.package(self.sources, native_members={
+                        name: source for name, source in self.native_members.items() if name != missing
+                    })
+                    with self.assertRaises(RuntimeError):
+                        self.module.verify_archive_sources(self.archive)
+
+    def test_same_size_modified_native_library_is_rejected(self):
+        for backend in ("cpu", "cuda"):
+            with self.subTest(backend=backend):
+                name = f"_internal/r2t2-native/{backend}/audiocpp.dll"
+                self.package(self.sources, native_members={
+                    **self.native_members, name: b"X" * len(self.native_members[name]),
+                })
+                with self.assertRaises(RuntimeError):
+                    self.module.verify_archive_sources(self.archive)
+
+    def test_duplicate_native_manifest_or_library_is_rejected(self):
+        for backend in ("cpu", "cuda"):
+            for filename in ("runtime-manifest.json", "audiocpp.dll"):
+                with self.subTest(backend=backend, filename=filename):
+                    name = f"_internal/r2t2-native/{backend}/{filename}"
+                    source = self.native_members[name]
+                    member = tarfile.TarInfo(name)
+                    member.size = len(source)
+                    self.package(self.sources, extra_members=[(member, source)])
+                    with self.assertRaises(RuntimeError):
+                        self.module.verify_archive_sources(self.archive)
+
+    def test_symlinked_native_manifest_or_library_is_rejected(self):
+        for backend in ("cpu", "cuda"):
+            for filename in ("runtime-manifest.json", "audiocpp.dll"):
+                with self.subTest(backend=backend, filename=filename):
+                    name = f"_internal/r2t2-native/{backend}/{filename}"
+                    member = tarfile.TarInfo(name)
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "../../../outside"
+                    self.package(
+                        self.sources,
+                        native_members={key: source for key, source in self.native_members.items() if key != name},
+                        extra_members=[(member, None)],
+                    )
+                    with self.assertRaises(RuntimeError):
+                        self.module.verify_archive_sources(self.archive)
 
 
 class BuildEngineArchiveAtomicityTests(unittest.TestCase):
@@ -158,12 +254,8 @@ class BuildEngineArchiveAtomicityTests(unittest.TestCase):
                 "patch_sha256": hashlib.sha256(self.module.R2T2_PATCH.read_bytes()).hexdigest(),
                 "files": {"audiocpp.dll": {"size": len(library), "sha256": hashlib.sha256(library).hexdigest()}},
             }), encoding="utf-8")
-        # Archive failure tests must not install or inspect the real CUDA provider.
-        provider_patcher = mock.patch.object(
-            self.module, "ensure_qwen3_cuda_provider"
-        )
-        self.ensure_qwen3_cuda_provider = provider_patcher.start()
-        self.addCleanup(provider_patcher.stop)
+        # Freeze installed metadata without depending on a retired helper API.
+        self.enterContext(mock.patch.object(importlib.metadata, "version", return_value="0.1.3"))
 
     def test_remove_file_retries_transient_windows_lock(self):
         locked_path = mock.Mock(spec=Path)
@@ -292,7 +384,6 @@ class BuildEngineArchiveAtomicityTests(unittest.TestCase):
         ):
             self.module.main()
 
-        self.ensure_qwen3_cuda_provider.assert_called_once_with()
         self.assertEqual(exit_context.exception.code, 23)
         self.assertTrue(
             self.output_archive.exists(),
@@ -322,7 +413,6 @@ class BuildEngineArchiveAtomicityTests(unittest.TestCase):
         ):
             self.module.main()
 
-        self.ensure_qwen3_cuda_provider.assert_called_once_with()
         used_staging_path = bool(attempted_outputs) and attempted_outputs[0] != self.output_archive
         preserved_archive = (
             self.output_archive.exists()

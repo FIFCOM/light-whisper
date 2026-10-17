@@ -1,6 +1,9 @@
 use super::{evaluate_polish_expansion, PolishOverrides};
 use crate::services::jev_service::JevProvider;
-use crate::state::AppState;
+use crate::state::{
+    user_profile::{JevConfig, JevConnection},
+    AppState,
+};
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -44,7 +47,7 @@ async fn auto_polish_accepts_eighty_percent_and_falls_back_below_either_threshol
             &state,
             ORIGINAL,
             &overrides,
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             Some(endpoint.as_str()),
         )
@@ -83,7 +86,7 @@ async fn unavailable_vercel_or_liquid_keeps_polish_and_screen_without_retry() {
             &state,
             ORIGINAL,
             &overrides,
-            provider,
+            &default_config(provider),
             TEST_API_KEY,
             Some(endpoint.as_str()),
         )
@@ -356,7 +359,7 @@ async fn partial_screen_answer_cannot_bypass_polishing() {
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -379,7 +382,7 @@ async fn auto_route_and_screen_share_one_request_and_preserve_policy() {
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -405,7 +408,7 @@ async fn route_pass_with_screen_needed_keeps_normal_processing_and_screen_contex
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -430,7 +433,7 @@ async fn polish_on_with_screen_auto_asks_only_screen_and_never_skips() {
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -455,7 +458,7 @@ async fn translation_auto_asks_only_screen_and_never_skips_polish() {
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -479,7 +482,7 @@ async fn screen_request_false_omits_screen_question_and_all_gates_skip_network()
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -498,7 +501,7 @@ async fn screen_request_false_omits_screen_question_and_all_gates_skip_network()
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -523,7 +526,7 @@ async fn explicit_screen_request_keeps_screen_enabled_after_unneeded_answer() {
         &state,
         ORIGINAL,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint.as_str()),
     )
@@ -548,7 +551,7 @@ async fn malformed_or_stalled_response_falls_back_without_skip_or_duplicate_call
             &state,
             ORIGINAL,
             &overrides,
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             Some(endpoint.as_str()),
         )
@@ -574,7 +577,7 @@ async fn malformed_or_stalled_response_falls_back_without_skip_or_duplicate_call
             &state,
             ORIGINAL,
             &overrides,
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             Some(endpoint.as_str()),
         ),
@@ -592,4 +595,43 @@ async fn malformed_or_stalled_response_falls_back_without_skip_or_duplicate_call
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     assert!(started.elapsed() < Duration::from_millis(1_800));
     server.abort();
+}
+
+fn default_config(provider: JevProvider) -> JevConfig {
+    JevConfig {
+        provider,
+        ..JevConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn configured_jev_polish_and_screen_route_use_the_captured_connection() {
+    let state = expansion_state(true, true);
+    state.update_profile_mut(|profile| {
+        profile.jev.connections.insert(
+            JevProvider::TypeSafe,
+            JevConnection {
+                base_url: "https://never-contact.invalid/Decision".into(),
+                model: "future-polish-decider".into(),
+            },
+        );
+    });
+    let config = state.with_profile(|profile| profile.jev.clone());
+    let (endpoint, count, server) = spawn_json_server("200 OK", PASS_AND_SCREEN_UNNEEDED).await;
+    let decision = evaluate_polish_expansion(
+        &state,
+        ORIGINAL,
+        &expansion_overrides(true, false),
+        &config,
+        TEST_API_KEY,
+        Some(&endpoint),
+    )
+    .await
+    .unwrap();
+    let captured = finish_json_server(server).await;
+    assert_eq!(captured.body["model"], "future-polish-decider");
+    assert_eq!(question_ids(&captured.body), vec!["route", "screen"]);
+    assert!(decision.skip_polish);
+    assert_eq!(decision.screen_allowed, Some(false));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }

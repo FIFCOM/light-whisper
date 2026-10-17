@@ -697,15 +697,15 @@ class ModelDownloadAtomicityTests(unittest.TestCase):
             download_models.main(engine="qwen3-asr-0.6b")
 
         config = download_model.call_args.args[0]
-        self.assertEqual(config["name"], "handy-computer/Qwen3-ASR-0.6B-gguf")
-        self.assertEqual(config["revision"], "e4e16599b900eb0cb36e524514756bb92eb092b7")
+        self.assertEqual(config["name"], "audio-cpp/audio.cpp-gguf")
+        self.assertEqual(config["revision"], "f861648c0c1f4da9f18e9a0ce5e217b0679bb2f5")
         self.assertEqual(
             config["files"],
             [
                 {
-                    "rfilename": "Qwen3-ASR-0.6B-Q8_0.gguf",
-                    "size": 850_423_456,
-                    "sha256": "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
+                    "rfilename": "Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf",
+                    "size": 1_151_272_416,
+                    "sha256": "6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
                 }
             ],
         )

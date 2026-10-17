@@ -5,7 +5,7 @@ use super::grok_build_oauth_service::{
     encode_grok_build_oauth_access_token, is_grok_build_oauth_origin_auth,
     resolve_image_support_for_request, should_prewarm_runtime_session,
     GrokBuildOauthDeviceCodeChallenge, GrokBuildOauthSession, GrokBuildOauthStatus,
-    GROK_BUILD_INFERENCE_BASE_URL, GROK_BUILD_OAUTH_PREFIX, XAI_API_KEY_INFERENCE_BASE_URL,
+    GROK_BUILD_MODELS_URL, GROK_BUILD_OAUTH_PREFIX, GROK_BUILD_RESPONSES_URL, XAI_API_MODELS_URL,
 };
 use super::llm_provider::{self, build_auth_headers};
 use crate::state::user_profile::{ApiFormat, LlmProviderConfig, XaiAuthMode};
@@ -41,29 +41,17 @@ fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<Stri
 }
 
 #[test]
-fn grok_build_prefix_and_inference_urls_match_the_spec() {
+fn grok_build_prefix_and_request_urls_match_the_spec() {
     assert_eq!(GROK_BUILD_OAUTH_PREFIX, "grok-build-oauth:");
     assert_eq!(
-        GROK_BUILD_INFERENCE_BASE_URL,
-        "https://cli-chat-proxy.grok.com"
-    );
-    assert_eq!(XAI_API_KEY_INFERENCE_BASE_URL, "https://api.x.ai");
-    assert_eq!(
-        format!("{GROK_BUILD_INFERENCE_BASE_URL}/v1/responses"),
+        GROK_BUILD_RESPONSES_URL,
         "https://cli-chat-proxy.grok.com/v1/responses"
     );
     assert_eq!(
-        format!("{GROK_BUILD_INFERENCE_BASE_URL}/v1/models"),
+        GROK_BUILD_MODELS_URL,
         "https://cli-chat-proxy.grok.com/v1/models"
     );
-    assert_eq!(
-        format!("{XAI_API_KEY_INFERENCE_BASE_URL}/v1/responses"),
-        "https://api.x.ai/v1/responses"
-    );
-    assert_eq!(
-        format!("{XAI_API_KEY_INFERENCE_BASE_URL}/v1/models"),
-        "https://api.x.ai/v1/models"
-    );
+    assert_eq!(XAI_API_MODELS_URL, "https://api.x.ai/v1/models");
 }
 
 #[test]

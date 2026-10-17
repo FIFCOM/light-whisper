@@ -1,4 +1,4 @@
-"""Build the pinned Windows R2T2 native library without changing global tools.
+"""Build the shared Windows Qwen3-ASR/R2T2 library without changing global tools.
 
 Requires Visual Studio C++ build tools, CMake/Ninja and (for CUDA) a compatible
 CUDA SDK. Models are downloaded separately; no model weights enter the bundle.
@@ -15,7 +15,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_URL = "https://github.com/0xShug0/audio.cpp.git"
 SOURCE_REVISION = "6c70f32d0d90a29a9863e556bd9712ce622f868b"
-BUILD_ID = "light-whisper-r2t2-5"
+BUILD_ID = "light-whisper-asr-8"
 PATCH = ROOT / "scripts/patches/audio-cpp-r2t2-windows-streaming.patch"
 
 
@@ -67,7 +67,7 @@ def prepare_source(source):
     if reverse.returncode:
         run(["git", "-C", source, "apply", "--check", PATCH])
         run(["git", "-C", source, "apply", PATCH])
-    modified = run(["git", "-C", source, "diff", "--binary", "HEAD"],
+    modified = run(["git", "-C", source, "diff", "--binary", "--unified=4", "HEAD"],
                    capture_output=True, text=True).stdout
     if modified.strip() != PATCH.read_text(encoding="utf-8").strip():
         raise RuntimeError("Native source contains changes other than the reviewed R2T2 patch")
@@ -162,8 +162,9 @@ def main():
     env, ninja = build_environment()
     command = ["cmake", "-S", source, "-B", build, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
                f"-DCMAKE_MAKE_PROGRAM={ninja}", "-DAUDIOCPP_MODEL_SET=custom",
-               "-DAUDIOCPP_MODELS=confucius4_r2t2", "-DAUDIOCPP_BUILD_C_API=ON",
+               "-DAUDIOCPP_MODELS=confucius4_r2t2,qwen3_asr", "-DAUDIOCPP_BUILD_C_API=ON",
                "-DAUDIOCPP_DEPLOYMENT_BUILD=ON", "-DENGINE_ENABLE_NATIVE_CPU=OFF",
+               "-DENGINE_ENABLE_VULKAN=OFF",
                "-DENGINE_ENABLE_LLAMAFILE=OFF", f"-DAUDIOCPP_VERSION={BUILD_ID}"]
     if args.backend == "cuda":
         cuda_root = cuda_root.absolute()

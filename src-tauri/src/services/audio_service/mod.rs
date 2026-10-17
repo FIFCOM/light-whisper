@@ -102,6 +102,8 @@ pub(crate) mod output;
 #[cfg(test)]
 mod output_tests;
 mod resample;
+#[cfg(test)]
+mod shared_native_route_tests;
 mod wav;
 #[cfg(target_os = "windows")]
 mod windows_capture;
@@ -121,3 +123,7 @@ pub use monitor::{
 pub(crate) use native_recording::spawn_native_recording;
 pub use native_recording::NativeRecording;
 pub use wav::encode_wav;
+
+pub(crate) fn uses_native_stream(engine: &str) -> bool {
+    matches!(engine, "qwen3-asr-0.6b" | "confucius4-r2t2")
+}

@@ -282,7 +282,7 @@ pub(crate) async fn start_recording_with_start_owner(
     };
 
     let (interim_task, native_recording) =
-        if crate::utils::paths::read_engine_config() == "confucius4-r2t2" {
+        if audio_service::uses_native_stream(&crate::utils::paths::read_engine_config()) {
             (
                 None,
                 Some(audio_service::spawn_native_recording(

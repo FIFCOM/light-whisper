@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::services::{jev_service, profile_service};
-use crate::state::user_profile::{JevProvider, UserProfile};
+use crate::state::user_profile::{JevConnection, JevProvider, UserProfile};
 use crate::state::AppState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +39,42 @@ fn apply_screen_context_mode(profile: &mut UserProfile, mode: FeatureMode) {
 fn apply_web_search_mode(profile: &mut UserProfile, mode: FeatureMode) {
     profile.web_search.enabled = mode.enabled();
     profile.jev.search_routing = mode.jev_routing();
+}
+
+pub fn apply_jev_connection(
+    profile: &mut UserProfile,
+    provider: JevProvider,
+    connection: JevConnection,
+) -> Result<(), String> {
+    let connection = jev_service::validate_connection(connection)?;
+    if connection.base_url.is_empty() && connection.model.is_empty() {
+        profile.jev.connections.remove(&provider);
+    } else {
+        profile.jev.connections.insert(provider, connection);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_jev_connection(
+    state: tauri::State<'_, AppState>,
+    provider: JevProvider,
+) -> Result<JevConnection, String> {
+    Ok(state.with_profile(|profile| jev_service::connection_for(&profile.jev, provider)))
+}
+
+#[tauri::command]
+pub async fn set_jev_connection(
+    state: tauri::State<'_, AppState>,
+    provider: JevProvider,
+    base_url: String,
+    model: String,
+) -> Result<(), String> {
+    state.update_profile_mut(|profile| {
+        apply_jev_connection(profile, provider, JevConnection { base_url, model })?;
+        profile_service::schedule_profile_save(profile.clone());
+        Ok(())
+    })
 }
 
 #[tauri::command]

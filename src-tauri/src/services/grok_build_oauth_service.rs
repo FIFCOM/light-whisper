@@ -33,10 +33,6 @@ const SESSION_REFRESH_TOKEN_KEYRING_USER: &str = "grok-build-oauth-refresh-token
 const OAUTH_TIMEOUT_SECS: u64 = 5 * 60;
 const REFRESH_SKEW_SECS: u64 = 60;
 pub const GROK_BUILD_OAUTH_PREFIX: &str = "grok-build-oauth:";
-#[allow(dead_code)]
-pub const GROK_BUILD_INFERENCE_BASE_URL: &str = "https://cli-chat-proxy.grok.com";
-#[allow(dead_code)]
-pub const XAI_API_KEY_INFERENCE_BASE_URL: &str = "https://api.x.ai";
 pub const GROK_BUILD_RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
 pub const GROK_BUILD_MODELS_URL: &str = "https://cli-chat-proxy.grok.com/v1/models";
 pub const XAI_API_MODELS_URL: &str = "https://api.x.ai/v1/models";

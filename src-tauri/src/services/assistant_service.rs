@@ -6,13 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::Emitter;
 
-use crate::services::jev_service::JevProvider;
 use crate::services::llm_client::{LlmImageInput, LlmRequestOptions, LlmUserInput};
 use crate::services::{
     codex_oauth_service, grok_build_oauth_service, jev_service, jev_tasks, llm_client,
     llm_provider, screen_capture_service, screen_vision_service, web_search_service,
 };
-use crate::state::user_profile::{UserProfile, WebSearchConfig, WebSearchProvider};
+use crate::state::user_profile::{JevConfig, UserProfile, WebSearchConfig, WebSearchProvider};
 use crate::state::AppState;
 use crate::utils::foreground::ForegroundApp;
 use crate::utils::AppError;
@@ -855,7 +854,7 @@ async fn evaluate_assistant_jev_routing(
     screen_routing: bool,
     search_enabled: bool,
     search_routing: bool,
-    provider: JevProvider,
+    config: &JevConfig,
 ) -> AssistantJevRouting {
     let include_screen = screen_routing && screen_requested;
     let include_search = search_routing && search_enabled;
@@ -879,10 +878,11 @@ async fn evaluate_assistant_jev_routing(
         "app_context": request_context.app_context.as_deref(),
         "screen_requested": screen_requested,
     });
-    let jev_key = jev_service::load_api_key_for_provider(app_handle, provider).unwrap_or_default();
+    let jev_key =
+        jev_service::load_api_key_for_provider(app_handle, config.provider).unwrap_or_default();
     let payload = jev_tasks::evaluate(
         &state.http_client,
-        provider,
+        config,
         &jev_key,
         state_payload,
         questions,
@@ -975,13 +975,7 @@ async fn generate_content_inner(
     let screen_context_requested = request_context
         .screen_context_enabled
         .unwrap_or_else(|| state.with_profile(UserProfile::screen_context_enabled));
-    let (screen_routing, search_routing, jev_provider) = state.with_profile(|profile| {
-        (
-            profile.jev.screen_routing,
-            profile.jev.search_routing,
-            profile.jev.provider,
-        )
-    });
+    let jev_config = state.with_profile(|profile| profile.jev.clone());
     let jev_routing = evaluate_assistant_jev_routing(
         state,
         asr_text,
@@ -990,10 +984,10 @@ async fn generate_content_inner(
         app_handle,
         &request_context,
         screen_context_requested,
-        screen_routing,
+        jev_config.screen_routing,
         effective_ws.enabled,
-        search_routing,
-        jev_provider,
+        jev_config.search_routing,
+        &jev_config,
     )
     .await;
     let screen_context_enabled = jev_routing
@@ -1014,7 +1008,7 @@ async fn generate_content_inner(
     let system_prompt = state.with_profile(build_assistant_system_prompt);
     let web_search_decision = assistant_search_for_mode(
         effective_ws.enabled,
-        search_routing,
+        jev_config.search_routing,
         jev_routing.search_allowed,
         asr_text,
         selected_text,

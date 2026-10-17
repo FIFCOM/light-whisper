@@ -15,6 +15,17 @@ use crate::utils::AppError;
 
 static NEXT_NATIVE_SESSION: AtomicU64 = AtomicU64::new(1);
 
+pub(super) fn stream_config(
+    engine: &str,
+    r2_config: &crate::state::user_profile::R2T2Config,
+) -> crate::state::user_profile::R2T2Config {
+    if engine == "confucius4-r2t2" {
+        r2_config.clone()
+    } else {
+        crate::state::user_profile::R2T2Config::default()
+    }
+}
+
 fn next_caption_update(
     previous: &mut Option<(String, String)>,
     update: &NativeStreamUpdate,
@@ -68,8 +79,8 @@ impl NativeRecording {
         }
         self.task
             .await
-            .map_err(|_| AppError::Asr("R2T2 录音任务异常结束".into()))??
-            .ok_or_else(|| AppError::Asr("R2T2 录音已取消".into()))
+            .map_err(|_| AppError::Asr("原生 ASR 录音任务异常结束".into()))??
+            .ok_or_else(|| AppError::Asr("原生 ASR 录音已取消".into()))
     }
 
     pub(crate) async fn cancel(mut self) -> Result<(), AppError> {
@@ -78,7 +89,7 @@ impl NativeRecording {
         }
         self.task
             .await
-            .map_err(|_| AppError::Asr("R2T2 录音任务异常结束".into()))??;
+            .map_err(|_| AppError::Asr("原生 ASR 录音任务异常结束".into()))??;
         Ok(())
     }
 }
@@ -86,9 +97,14 @@ impl NativeRecording {
 struct AppSink {
     app: tauri::AppHandle,
     client: NativeStreamClient,
+    chunk_samples: usize,
 }
 
 impl NativeCaptureSink for AppSink {
+    fn chunk_samples(&self) -> usize {
+        self.chunk_samples
+    }
+
     async fn feed(&mut self, samples: &[i16]) -> Result<NativeStreamUpdate, AppError> {
         self.client
             .feed(
@@ -118,7 +134,15 @@ pub(crate) fn spawn_native_recording(
 ) -> NativeRecording {
     let state = app.state::<AppState>();
     let owner = state.engine.native_asr_owner.clone();
-    let config = state.with_profile(|profile| profile.r2t2.clone());
+    let engine = crate::utils::paths::read_engine_config();
+    let config = state.with_profile(|profile| stream_config(&engine, &profile.r2t2));
+    // Qwen owns its preview cadence. Forward capture every 40 ms so its first
+    // hypothesis need not wait for an additional R2T2-sized audio batch.
+    let chunk_samples = if engine == "qwen3-asr-0.6b" {
+        640
+    } else {
+        2560
+    };
     let (sender, mut control) = oneshot::channel();
     let task = tokio::spawn(async move {
         // Preserve the mutex queue position if Finish arrives before ownership.
@@ -157,6 +181,7 @@ pub(crate) fn spawn_native_recording(
         let sink = AppSink {
             app: app.clone(),
             client,
+            chunk_samples,
         };
         let previous_caption = parking_lot::Mutex::new(None);
         let caption_app = app.clone();

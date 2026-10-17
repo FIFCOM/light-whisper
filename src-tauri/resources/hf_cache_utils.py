@@ -10,18 +10,11 @@ import hashlib
 
 QWEN3_ASR_MODELS = {
     "qwen3-asr-0.6b": {
-        "repo_id": "handy-computer/Qwen3-ASR-0.6B-gguf",
-        "filename": "Qwen3-ASR-0.6B-Q8_0.gguf",
-        "revision": "e4e16599b900eb0cb36e524514756bb92eb092b7",
-        "size": 850_423_456,
-        "sha256": "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
-    },
-    "qwen3-asr-1.7b": {
-        "repo_id": "handy-computer/Qwen3-ASR-1.7B-gguf",
-        "filename": "Qwen3-ASR-1.7B-Q8_0.gguf",
-        "revision": "92282af1610a2db19d66f2bef1e260f5deca782d",
-        "size": 2_185_030_624,
-        "sha256": "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+        "repo_id": "audio-cpp/audio.cpp-gguf",
+        "filename": "Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf",
+        "revision": "f861648c0c1f4da9f18e9a0ce5e217b0679bb2f5",
+        "size": 1_151_272_416,
+        "sha256": "6c44ec2fb4cee513892d7863c1fcc3ea6b699ffa4d899b0ef4ab19956d9544f7",
     },
 }
 

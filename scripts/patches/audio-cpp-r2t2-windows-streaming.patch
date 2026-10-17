@@ -1,8 +1,86 @@
+diff --git a/external/ggml/src/ggml-cpu/ops.cpp b/external/ggml/src/ggml-cpu/ops.cpp
+index fcdcd8d..0d8319a 100644
+--- a/external/ggml/src/ggml-cpu/ops.cpp
++++ b/external/ggml/src/ggml-cpu/ops.cpp
+@@ -1597,9 +1597,19 @@ static void ggml_compute_forward_argmax_f32(
+     for (int64_t i1 = 0; i1 < ne01; i1++) {
+         float * src = (float *) ((char *) src0->data + i1*nb01);
+         int32_t * dst_ = (int32_t *) ((char *)  dst->data + i1*nb0);
+         int v = 0;
+-        ggml_vec_argmax_f32(ne00, &v, src);
++        if (dst->op_params[0] == 1) {
++            float max = src[0];
++            for (int64_t i = 1; i < ne00; ++i) {
++                if (src[i] > max) {
++                    max = src[i];
++                    v = static_cast<int>(i);
++                }
++            }
++        } else {
++            ggml_vec_argmax_f32(ne00, &v, src);
++        }
+         dst_[0] = v;
+     }
+ }
+ 
+diff --git a/external/ggml/src/ggml-cuda/argmax.cu b/external/ggml/src/ggml-cuda/argmax.cu
+index 6b89931..c2ab511 100644
+--- a/external/ggml/src/ggml-cuda/argmax.cu
++++ b/external/ggml/src/ggml-cuda/argmax.cu
+@@ -4,14 +4,14 @@
+ #include "argmax.cuh"
+ #include "common.cuh"
+ #include "sum.cuh"
+ 
+-static __global__ void argmax_f32(const float * __restrict__ x, int32_t * __restrict__ dst, const int64_t ncols) {
++static __global__ void argmax_f32(const float * __restrict__ x, int32_t * __restrict__ dst, const int64_t ncols, const bool first_max) {
+     const int64_t row = blockIdx.x;
+ 
+-    float maxval = -FLT_MAX;
+-    int   argmax = -1;
+     const float * rowx = x + row * ncols;
++    float maxval = first_max ? rowx[0] : -FLT_MAX;
++    int   argmax = first_max ? 0 : -1;
+ 
+     for (int32_t col = threadIdx.x; col < ncols; col += blockDim.x) {
+         const float val = rowx[col];
+         if (val > maxval) {
+@@ -23,9 +23,9 @@ static __global__ void argmax_f32(const float * __restrict__ x, int32_t * __rest
+ #pragma unroll
+     for (int offset = WARP_SIZE/2; offset > 0; offset >>= 1) {
+         const float val = __shfl_xor_sync(0xFFFFFFFF, maxval, offset, WARP_SIZE);
+         const int   col = __shfl_xor_sync(0xFFFFFFFF, argmax, offset, WARP_SIZE);
+-        if (val > maxval) {
++        if (val > maxval || (first_max && val == maxval && col < argmax)) {
+             maxval = val;
+             argmax = col;
+         }
+     }
+@@ -52,9 +52,9 @@ static __global__ void argmax_f32(const float * __restrict__ x, int32_t * __rest
+ #pragma unroll
+             for (int offset = WARP_SIZE/2; offset > 0; offset >>= 1) {
+                 const float val = __shfl_xor_sync(0xFFFFFFFF, maxval, offset, WARP_SIZE);
+                 const int   col = __shfl_xor_sync(0xFFFFFFFF, argmax, offset, WARP_SIZE);
+-                if (val > maxval) {
++                if (val > maxval || (first_max && val == maxval && col < argmax)) {
+                     maxval = val;
+                     argmax = col;
+                 }
+             }
+@@ -86,6 +86,6 @@ void ggml_cuda_argmax(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     const int64_t num_threads = std::min<int64_t>(1024, (ne00 + WARP_SIZE - 1) / WARP_SIZE * WARP_SIZE);
+     const dim3 blocks_dim(num_threads, 1, 1);
+     const dim3 blocks_num(num_blocks, 1, 1);
+ 
+-    argmax_f32<<<blocks_num, blocks_dim, 0, stream>>>(src0_d, dst_d, ne00);
++    argmax_f32<<<blocks_num, blocks_dim, 0, stream>>>(src0_d, dst_d, ne00, dst->op_params[0] == 1);
+ }
 diff --git a/include/audiocpp.h b/include/audiocpp.h
 index 76cfe6b..b3bd786 100644
 --- a/include/audiocpp.h
 +++ b/include/audiocpp.h
-@@ -51,7 +51,7 @@ extern "C" {
+@@ -50,9 +50,9 @@ extern "C" {
+ /* Versioning                                                          */
  /* ------------------------------------------------------------------ */
  
  #define AUDIOCPP_ABI_VERSION_MAJOR 0
@@ -11,7 +89,9 @@ index 76cfe6b..b3bd786 100644
  #define AUDIOCPP_ABI_VERSION_PATCH 0
  
  /* Packed as (major << 16) | (minor << 8) | patch. A caller built against a
-@@ -408,6 +408,10 @@ AUDIOCPP_API audiocpp_status audiocpp_result_text(const audiocpp_result * result
+  * different MAJOR must not use the library. MINOR increments when entry points
+@@ -407,8 +407,12 @@ AUDIOCPP_API audiocpp_status audiocpp_result_audio(const audiocpp_result * resul
+ AUDIOCPP_API audiocpp_status audiocpp_result_text(const audiocpp_result * result,
                                                    const char ** out_text,
                                                    const char ** out_language);
  
@@ -22,11 +102,45 @@ index 76cfe6b..b3bd786 100644
  AUDIOCPP_API size_t          audiocpp_result_segment_count(const audiocpp_result * result);
  AUDIOCPP_API audiocpp_status audiocpp_result_segment(const audiocpp_result * result,
                                                       size_t index,
+                                                      int64_t * out_start_sample,
+diff --git a/include/engine/community_models/confucius4_r2t2/frontend_whisper.h b/include/engine/community_models/confucius4_r2t2/frontend_whisper.h
+index 9b56577..ead7bc4 100644
+--- a/include/engine/community_models/confucius4_r2t2/frontend_whisper.h
++++ b/include/engine/community_models/confucius4_r2t2/frontend_whisper.h
+@@ -4,8 +4,9 @@
+ #include "engine/community_models/confucius4_r2t2/assets.h"
+ #include "engine/community_models/confucius4_r2t2/types.h"
+ 
+ #include <memory>
++#include <mutex>
+ 
+ namespace engine::community_models::confucius4_r2t2 {
+ 
+ class R2T2ASRWhisperFrontend {
+@@ -14,9 +15,17 @@ public:
+ 
+     R2T2ASRAudioFeatures extract(const runtime::AudioBuffer & audio) const;
+ 
+ private:
++    struct MagnitudeCache {
++        std::mutex mutex;
++        std::vector<float> samples;
++        engine::audio::AudioTensor magnitude;
++    };
++
+     std::shared_ptr<const R2T2ASRAssets> assets_;
+     engine::audio::WhisperLogMelExtractor extractor_;
++    // Keep the frontend copyable; copies share only this synchronized cache.
++    std::shared_ptr<MagnitudeCache> cache_ = std::make_shared<MagnitudeCache>();
+ };
+ 
+ }  // namespace engine::community_models::confucius4_r2t2
 diff --git a/include/engine/community_models/confucius4_r2t2/session.h b/include/engine/community_models/confucius4_r2t2/session.h
 index 1e9d319..9ef4049 100644
 --- a/include/engine/community_models/confucius4_r2t2/session.h
 +++ b/include/engine/community_models/confucius4_r2t2/session.h
-@@ -11,6 +11,7 @@
+@@ -10,8 +10,9 @@
+ #include "engine/community_models/confucius4_r2t2/types.h"
  
  #include <chrono>
  #include <cstdint>
@@ -34,7 +148,9 @@ index 1e9d319..9ef4049 100644
  #include <memory>
  #include <string>
  #include <vector>
-@@ -30,6 +31,7 @@ struct R2T2ASRStreamConfig {
+ 
+@@ -29,8 +30,9 @@ struct R2T2ASRStreamConfig {
+     int64_t unfixed_chunk_num = 2;
      int64_t unfixed_token_num = 5;
      bool rollback_punctuation = false;
      int64_t max_new_tokens = 32;
@@ -42,7 +158,9 @@ index 1e9d319..9ef4049 100644
  };
  
  /// Confucius4-R2T2 streaming ASR session.
-@@ -70,9 +72,15 @@ public:
+ ///
+@@ -69,20 +71,29 @@ public:
+     runtime::TaskResult finish_stream() override;
      runtime::TaskResult finalize() override;
  
  private:
@@ -58,7 +176,7 @@ index 1e9d319..9ef4049 100644
      };
  
      R2T2ASRRequest make_request(const runtime::TaskRequest & request) const;
-@@ -80,8 +88,11 @@ private:
+     R2T2ASRResult run_single(const R2T2ASRRequest & request);
      std::string generate_text(const R2T2ASRPrompt & prompt, const R2T2ASRAudioEmbeddings & embeddings);
  
      StreamOutcome decode_stream_chunk(bool final_flush);
@@ -70,7 +188,9 @@ index 1e9d319..9ef4049 100644
      void publish_stream_delta(const std::string & fixed_text, runtime::StreamEvent & event);
  
      runtime::TaskSpec task_;
-@@ -113,6 +124,12 @@ private:
+     std::shared_ptr<const R2T2ASRAssets> assets_;
+@@ -112,8 +123,14 @@ private:
+     std::vector<float> audio_accum_;
      int64_t chunk_size_samples_ = 0;
      int64_t chunk_id_ = 0;
      size_t published_codepoints_ = 0;
@@ -83,11 +203,13 @@ index 1e9d319..9ef4049 100644
      int stream_sample_rate_ = 0;
      int stream_channels_ = 1;
      runtime::StreamEventCallback stream_event_sink_;
+     bool stream_started_ = false;
 diff --git a/include/engine/community_models/confucius4_r2t2/text_postprocess.h b/include/engine/community_models/confucius4_r2t2/text_postprocess.h
 index dc0f525..e920924 100644
 --- a/include/engine/community_models/confucius4_r2t2/text_postprocess.h
 +++ b/include/engine/community_models/confucius4_r2t2/text_postprocess.h
-@@ -56,6 +56,9 @@ R2T2ParsedOutput parse_asr_output(const std::string & raw, const std::string & u
+@@ -55,8 +55,11 @@ R2T2ParsedOutput parse_asr_output(const std::string & raw, const std::string & u
+ 
  /// text.split("|")[0]
  std::string truncate_at_pipe(const std::string & text);
  
@@ -97,11 +219,68 @@ index dc0f525..e920924 100644
  bool contains_asr_text_tag(const std::string & text);
  
  /// Part before the <asr_text> tag (empty when the tag is absent).
+ std::string text_before_asr_tag(const std::string & text);
+diff --git a/include/engine/framework/audio/dsp.h b/include/engine/framework/audio/dsp.h
+index 7a12f98..063d8ca 100644
+--- a/include/engine/framework/audio/dsp.h
++++ b/include/engine/framework/audio/dsp.h
+@@ -131,8 +131,9 @@ public:
+     const WhisperLogMelConfig & config() const noexcept;
+     WhisperLogMelFeatures compute(
+         const std::vector<float> & samples,
+         size_t threads = 0) const;
++    WhisperLogMelFeatures compute_from_magnitude(const AudioTensor & magnitude) const;
+ 
+ private:
+     WhisperLogMelConfig config_;
+     SparseMelFilterbank filterbank_;
+diff --git a/include/engine/framework/modules/transformers/qwen_causal_decode_runtime.h b/include/engine/framework/modules/transformers/qwen_causal_decode_runtime.h
+index e48ce6b..a7e665a 100644
+--- a/include/engine/framework/modules/transformers/qwen_causal_decode_runtime.h
++++ b/include/engine/framework/modules/transformers/qwen_causal_decode_runtime.h
+@@ -28,8 +28,11 @@ struct QwenCausalDecodeRuntimeConfig {
+     std::optional<ggml_type> readback_round_type;
+     std::vector<int32_t> logits_readback_token_ids;
+     int64_t sliding_window = 0;
+     bool evict_cuda_graph_cache_on_release = false;
++    // Return only the FIRST-max token for chunked cache prefill and decode_token[_into]
++    // with full LastStep logits on CPU/CUDA. Other paths retain their usual outputs.
++    bool greedy_token_readback = false;
+ };
+ 
+ struct QwenCausalDecodeRuntimeWeights {
+     core::TensorValue token_embedding;
+@@ -59,8 +62,9 @@ struct QwenCausalBatchedPrefillResult {
+ 
+ struct QwenCausalDecodeStepResult {
+     std::vector<float> logits;
+     std::vector<float> hidden;
++    std::optional<int32_t> token_id;
+ };
+ 
+ class QwenCausalDecodeRuntime {
+ public:
+diff --git a/include/engine/framework/runtime/greedy_qwen_decoder.h b/include/engine/framework/runtime/greedy_qwen_decoder.h
+index 162532a..df2208f 100644
+--- a/include/engine/framework/runtime/greedy_qwen_decoder.h
++++ b/include/engine/framework/runtime/greedy_qwen_decoder.h
+@@ -29,8 +29,10 @@ struct GreedyQwenDecoderSpec {
+     std::string lm_head_tensor;  // used when !tie_word_embeddings
+     std::string final_norm_tensor;
+     std::string layer_prefix;  // e.g. "language_model.model.layers"
+     std::vector<int64_t> eos_token_ids;
++    // Keep the established streaming numerics unless a model opts into larger blocks.
++    int64_t prefill_chunk_steps = 64;
+ };
+ 
+ // Greedy autoregressive decoding over a Qwen-style decoder stack: prefill
+ // with optional audio-embedding injection (ggml_set_rows at prompt
 diff --git a/include/engine/framework/runtime/session.h b/include/engine/framework/runtime/session.h
 index bdc03f2..3a8011c 100644
 --- a/include/engine/framework/runtime/session.h
 +++ b/include/engine/framework/runtime/session.h
-@@ -81,6 +81,8 @@ struct AudioChunk {
+@@ -80,8 +80,10 @@ struct AudioChunk {
+ 
  struct Transcript {
      std::string text;
      std::string language;
@@ -110,11 +289,13 @@ index bdc03f2..3a8011c 100644
  };
  
  struct TimeSpan {
+     int64_t start_sample = 0;
 diff --git a/model_specs/confucius4_r2t2.json b/model_specs/confucius4_r2t2.json
 index fdf8b33..42dacda 100644
 --- a/model_specs/confucius4_r2t2.json
 +++ b/model_specs/confucius4_r2t2.json
-@@ -231,6 +231,13 @@
+@@ -230,8 +230,15 @@
+         "required": false,
          "default": 32,
          "description": "Greedy decode budget per streaming chunk and for the final flush (session-scoped; distinct from the offline request max_tokens)."
        },
@@ -128,11 +309,13 @@ index fdf8b33..42dacda 100644
        {
          "name": "audio_encoder_weight_type",
          "type": "enum",
+         "preset": "weight_type_conv",
 diff --git a/src/capi/audiocpp.cpp b/src/capi/audiocpp.cpp
 index 1582084..9c3860e 100644
 --- a/src/capi/audiocpp.cpp
 +++ b/src/capi/audiocpp.cpp
-@@ -900,6 +900,18 @@ audiocpp_status audiocpp_result_text(const audiocpp_result * result,
+@@ -899,8 +899,20 @@ audiocpp_status audiocpp_result_text(const audiocpp_result * result,
+     assign_out(out_language, result->result.text_output->language);
      return AUDIOCPP_OK;
  }
  
@@ -151,11 +334,93 @@ index 1582084..9c3860e 100644
  size_t audiocpp_result_segment_count(const audiocpp_result * result) {
      return result != nullptr ? result->result.speech_segments.size() : 0;
  }
+ 
+diff --git a/src/community_models/confucius4_r2t2/frontend_whisper.cpp b/src/community_models/confucius4_r2t2/frontend_whisper.cpp
+index e1b670e..c637b8b 100644
+--- a/src/community_models/confucius4_r2t2/frontend_whisper.cpp
++++ b/src/community_models/confucius4_r2t2/frontend_whisper.cpp
+@@ -7,8 +7,9 @@
+ 
+ #include <algorithm>
+ #include <chrono>
+ #include <cmath>
++#include <cstring>
+ #include <stdexcept>
+ #include <utility>
+ 
+ namespace engine::community_models::confucius4_r2t2 {
+@@ -75,9 +76,64 @@ R2T2ASRAudioFeatures R2T2ASRWhisperFrontend::extract(const runtime::AudioBuffer
+     auto samples = normalize_audio(audio, config.sample_rate);
+     const auto normalize_end = Clock::now();
+ 
+     const auto feature_start = Clock::now();
+-    auto features = extractor_.compute(samples);
++    engine::audio::WhisperLogMelFeatures features;
++    {
++        std::lock_guard<std::mutex> lock(cache_->mutex);
++        const auto & dsp_config = extractor_.config();
++        engine::audio::STFTConfig stft_config{
++            dsp_config.n_fft, dsp_config.hop_length, dsp_config.n_fft, true,
++            engine::audio::STFTPadMode::Reflect, dsp_config.stft_family,
++        };
++        const auto & window = engine::audio::get_cached_stft_window(stft_config);
++        const int64_t previous_samples = static_cast<int64_t>(cache_->samples.size());
++        const int64_t sample_count = static_cast<int64_t>(samples.size());
++        const int64_t pad = dsp_config.n_fft / 2;
++        int64_t stable_frames = 0;
++        // Longer FFTs can reflect repeatedly through the old input. Use the full
++        // extraction until the old window contains a complete FFT instead.
++        if (previous_samples >= dsp_config.n_fft && sample_count >= previous_samples &&
++            std::memcmp(samples.data(), cache_->samples.data(),
++                        cache_->samples.size() * sizeof(float)) == 0) {
++            stable_frames = 1 + (previous_samples - (dsp_config.n_fft - pad)) / dsp_config.hop_length;
++        }
++
++        engine::audio::AudioTensor magnitude;
++        if (stable_frames == 0) {
++            magnitude = engine::audio::STFT().compute_magnitude(samples, window, 1, sample_count, stft_config);
++        } else {
++            const int64_t frames = 1 + (sample_count + 2 * pad - dsp_config.n_fft) / dsp_config.hop_length;
++            const int64_t freq_bins = dsp_config.n_fft / 2 + 1;
++            const int64_t previous_frames = cache_->magnitude.shape[2];
++            const int64_t tail_frames = frames - stable_frames;
++            magnitude.shape = {1, freq_bins, frames};
++            magnitude.values.resize(static_cast<size_t>(freq_bins * frames));
++            engine::audio::AudioTensor tail;
++            if (tail_frames > 0) {
++                const int64_t start = stable_frames * dsp_config.hop_length - pad;
++                std::vector<float> tail_samples(samples.begin() + start, samples.end());
++                for (int64_t i = 0; i < pad; ++i) {
++                    tail_samples.push_back(samples[static_cast<size_t>(sample_count - i - 2)]);
++                }
++                stft_config.center = false;
++                tail = engine::audio::STFT().compute_magnitude(
++                    tail_samples, window, 1, static_cast<int64_t>(tail_samples.size()), stft_config);
++            }
++            for (int64_t f = 0; f < freq_bins; ++f) {
++                auto destination = magnitude.values.begin() + f * frames;
++                std::copy_n(cache_->magnitude.values.begin() + f * previous_frames, stable_frames, destination);
++                if (tail_frames > 0) {
++                    std::copy_n(tail.values.begin() + f * tail_frames, tail_frames, destination + stable_frames);
++                }
++            }
++        }
++        // The global log-mel floor may change old features when loud audio is
++        // appended, so only raw magnitudes participate in reuse.
++        features = extractor_.compute_from_magnitude(magnitude);
++        cache_->samples = std::move(samples);
++        cache_->magnitude = std::move(magnitude);
++    }
+     const auto feature_end = Clock::now();
+ 
+     R2T2ASRAudioFeatures out;
+     out.values = std::move(features.values);
 diff --git a/src/community_models/confucius4_r2t2/session.cpp b/src/community_models/confucius4_r2t2/session.cpp
 index 68853c0..adc4f4e 100644
 --- a/src/community_models/confucius4_r2t2/session.cpp
 +++ b/src/community_models/confucius4_r2t2/session.cpp
-@@ -125,6 +125,9 @@ R2T2ASRSession::R2T2ASRSession(
+@@ -124,8 +124,11 @@ R2T2ASRSession::R2T2ASRSession(
+     }
      if (const auto value = runtime::parse_int_option(options.options, {"confucius4_r2t2.max_tokens"})) {
          stream_config_.max_new_tokens = *value;
      }
@@ -165,7 +430,9 @@ index 68853c0..adc4f4e 100644
      if (stream_config_.chunk_seconds <= 0.0) {
          throw std::runtime_error("confucius4_r2t2.chunk_size_ms must be positive");
      }
-@@ -148,7 +151,8 @@ R2T2ASRSession::R2T2ASRSession(
+     if (stream_config_.unfixed_chunk_num < 0 || stream_config_.unfixed_token_num < 0) {
+@@ -147,9 +150,10 @@ R2T2ASRSession::R2T2ASRSession(
+             key != "confucius4_r2t2.chunk_size_ms" &&
              key != "confucius4_r2t2.unfixed_chunk_num" &&
              key != "confucius4_r2t2.unfixed_token_num" &&
              key != "confucius4_r2t2.rollback_punctuation" &&
@@ -175,7 +442,9 @@ index 68853c0..adc4f4e 100644
              throw std::runtime_error("unknown R2T2 ASR session option: " + key);
          }
      }
-@@ -307,6 +311,10 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
+     assets_->model_weights->release_storage();
+@@ -306,8 +310,12 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
+         return {};
      }
      const std::string raw_truncated = truncate_at_pipe(raw_decoded_);
      const auto ids = tokenizer_.encode(raw_truncated);
@@ -186,7 +455,9 @@ index 68853c0..adc4f4e 100644
      if (final_flush) {
          // finish_streaming_transcribe uses a fixed rollback without the
          // replacement-character loop and never rolls back past the first token.
-@@ -320,7 +328,70 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
+         const int64_t end_index = std::max<int64_t>(1, static_cast<int64_t>(ids.size()) - stream_config_.unfixed_token_num);
+@@ -319,9 +327,72 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
+     }
      return truncate_at_pipe(decode_rollback_prefix(ids, k));
  }
  
@@ -257,7 +528,9 @@ index 68853c0..adc4f4e 100644
      StreamOutcome outcome;
      const std::string prefix = build_stream_prefix(final_flush);
  
-@@ -389,6 +460,7 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
+     runtime::AudioBuffer accum;
+@@ -388,8 +459,9 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
+     language_ = parsed.language;
      text_ = truncate_at_pipe(parsed.text);
      ++chunk_id_;
      outcome.text = text_;
@@ -265,7 +538,9 @@ index 68853c0..adc4f4e 100644
      outcome.fixed_text = fixed_text;
      debug::trace_log_scalar("confucius4_r2t2.stream.final_flush", final_flush ? 1 : 0);
      debug::trace_log_scalar("confucius4_r2t2.stream.chunk_id", chunk_id_);
-@@ -398,6 +470,160 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
+     debug::trace_log_scalar("confucius4_r2t2.stream.raw_decoded", raw_decoded_);
+@@ -397,8 +469,162 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
+     debug::trace_log_scalar("confucius4_r2t2.stream.text", text_);
      return outcome;
  }
  
@@ -426,7 +701,9 @@ index 68853c0..adc4f4e 100644
  void R2T2ASRSession::publish_stream_delta(const std::string & fixed_text, runtime::StreamEvent & event) {
      // fixed_text contains transcript text only; metadata must never advance
      // this code-point offset. Stable transcript prefixes may still shrink
-@@ -469,6 +695,12 @@ void R2T2ASRSession::reset() {
+     // between chunks, so only publish newly committed code points.
+@@ -468,8 +694,14 @@ void R2T2ASRSession::reset() {
+     audio_accum_.clear();
      chunk_size_samples_ = 0;
      chunk_id_ = 0;
      published_codepoints_ = 0;
@@ -439,7 +716,9 @@ index 68853c0..adc4f4e 100644
      stream_sample_rate_ = 0;
      stream_channels_ = 1;
      stream_started_ = false;
-@@ -505,13 +737,33 @@ runtime::StreamEvent R2T2ASRSession::process_audio_chunk(const runtime::AudioChu
+     stream_wall_start_ = {};
+@@ -504,15 +736,35 @@ runtime::StreamEvent R2T2ASRSession::process_audio_chunk(const runtime::AudioChu
+     runtime::StreamEvent event;
      event.is_final = false;
      const size_t channel_stride = static_cast<size_t>(chunk.channels);
      while (buffer_.size() >= static_cast<size_t>(chunk_size_samples_) * channel_stride) {
@@ -474,7 +753,9 @@ index 68853c0..adc4f4e 100644
          if (!streaming_result_.text_output.has_value()) {
              streaming_result_.text_output = runtime::Transcript{outcome.text, language_};
          } else {
-@@ -546,6 +798,13 @@ runtime::TaskResult R2T2ASRSession::finalize() {
+             streaming_result_.text_output->text = outcome.text;
+@@ -545,8 +797,15 @@ runtime::TaskResult R2T2ASRSession::finalize() {
+     if (!stream_started_) {
          throw std::runtime_error("R2T2 ASR finalize() requires start_stream");
      }
      if (!buffer_.empty()) {
@@ -488,11 +769,13 @@ index 68853c0..adc4f4e 100644
          audio_accum_.insert(audio_accum_.end(), buffer_.begin(), buffer_.end());
          buffer_.clear();
          const auto outcome = decode_stream_chunk(/*final_flush=*/true);
+         if (!streaming_result_.text_output.has_value()) {
 diff --git a/src/community_models/confucius4_r2t2/text_postprocess.cpp b/src/community_models/confucius4_r2t2/text_postprocess.cpp
 index 0b3474f..82c8689 100644
 --- a/src/community_models/confucius4_r2t2/text_postprocess.cpp
 +++ b/src/community_models/confucius4_r2t2/text_postprocess.cpp
-@@ -357,6 +357,10 @@ R2T2ParsedOutput parse_tagged_output(const std::string & raw, const std::string
+@@ -356,8 +356,12 @@ R2T2ParsedOutput parse_tagged_output(const std::string & raw, const std::string
+ }
  
  }  // namespace
  
@@ -503,3 +786,852 @@ index 0b3474f..82c8689 100644
  std::string sanitize_utf8_lossy(const std::string & text) {
      std::string out;
      out.reserve(text.size() + 16);
+     size_t i = 0;
+diff --git a/src/framework/audio/dsp.cpp b/src/framework/audio/dsp.cpp
+index 0397642..5e0c9e9 100644
+--- a/src/framework/audio/dsp.cpp
++++ b/src/framework/audio/dsp.cpp
+@@ -774,10 +774,15 @@ WhisperLogMelFeatures WhisperLogMelExtractor::compute(
+         1,
+         static_cast<int64_t>(samples.size()),
+         stft_config,
+         threads);
+-    if (magnitude.shape.size() != 3) {
+-        throw std::runtime_error("Whisper log-mel STFT returned unexpected rank");
++    return compute_from_magnitude(magnitude);
++}
++
++WhisperLogMelFeatures WhisperLogMelExtractor::compute_from_magnitude(const AudioTensor & magnitude) const {
++    if (magnitude.shape.size() != 3 || magnitude.shape[0] != 1 ||
++        magnitude.shape[1] != config_.n_fft / 2 + 1) {
++        throw std::runtime_error("Whisper log-mel STFT returned unexpected shape");
+     }
+     const int64_t freq_bins = magnitude.shape[1];
+     const int64_t stft_frames = magnitude.shape[2];
+     if (stft_frames <= 1) {
+diff --git a/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp b/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp
+index 37637bd..a1fe58c 100644
+--- a/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp
++++ b/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp
+@@ -654,16 +654,22 @@ public:
+             ggml_backend_tensor_set(block_positions_, positions.data(), 0, positions.size() * sizeof(int32_t));
+             ggml_backend_tensor_set(block_mask_, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+             ggml_backend_tensor_set(block_last_, &last, 0, sizeof(last));
+             core::set_backend_threads(backend_, threads_);
+-            if (core::compute_backend_graph(backend_, block_graph_) != GGML_STATUS_SUCCESS) {
++            auto * graph = offset + count < steps ? block_cache_graph_ : block_graph_;
++            if (core::compute_backend_graph(backend_, graph) != GGML_STATUS_SUCCESS) {
+                 throw std::runtime_error("Qwen chunked prefill compute failed");
+             }
+             decode_cache_.advance_after_direct_append(count);
+         }
+         ggml_backend_synchronize(backend_);
+         QwenCausalDecodeStepResult result;
+-        if (block_logits_) { result.logits = core::read_tensor_f32(block_logits_); }
++        if (block_token_id_) {
++            result.token_id.emplace();
++            ggml_backend_tensor_get(block_token_id_, &*result.token_id, 0, sizeof(int32_t));
++        } else if (block_logits_) {
++            result.logits = core::read_tensor_f32(block_logits_);
++        }
+         if (block_hidden_) {
+             result.hidden = core::read_tensor_f32(block_hidden_);
+             round_readback(result.hidden, config_);
+         }
+@@ -798,8 +804,16 @@ private:
+         Token,
+         Embedding,
+     };
+ 
++    bool greedy_token_readback_enabled() const noexcept {
++        return config_.greedy_token_readback &&
++            config_.output_mode == QwenCausalDecodeOutputMode::Logits &&
++            config_.decoder.logits_mode == QwenCausalDecoderLogitsMode::LastStep &&
++            config_.logits_readback_token_ids.empty() &&
++            (backend_type_ == core::BackendType::Cpu || backend_type_ == core::BackendType::Cuda);
++    }
++
+     void ensure_prefill_token_graph(int64_t steps, bool populate_decode_cache) {
+         if (prefill_graph_ != nullptr && prefill_input_kind_ == InputKind::Token && prefill_steps_ == steps &&
+             prefill_populates_decode_cache_ == populate_decode_cache) {
+             debug::trace_log_scalar(config_.trace_name + ".prefill.steps", steps);
+@@ -1341,13 +1355,19 @@ private:
+                     config_,
+                     logits,
+                     wrap_logits_readback_token_ids(decode_logits_readback_token_ids_, config_));
+             }
+-            decode_logits_ = ggml_cpy(
+-                decode_ctx_.get(),
+-                logits.tensor,
+-                ggml_dup_tensor(decode_ctx_.get(), logits.tensor));
+-            ggml_set_output(decode_logits_);
++            if (input_kind == InputKind::Token && greedy_token_readback_enabled()) {
++                decode_token_id_ = ggml_argmax(decode_ctx_.get(), logits.tensor);
++                decode_token_id_->op_params[0] = 1;  // Opt in to generation's FIRST-max tie rule.
++                ggml_set_output(decode_token_id_);
++            } else {
++                decode_logits_ = ggml_cpy(
++                    decode_ctx_.get(),
++                    logits.tensor,
++                    ggml_dup_tensor(decode_ctx_.get(), logits.tensor));
++                ggml_set_output(decode_logits_);
++            }
+         }
+         if (config_.return_hidden || config_.output_mode == QwenCausalDecodeOutputMode::Hidden) {
+             decode_hidden_ = ggml_cpy(
+                 decode_ctx_.get(),
+@@ -1357,8 +1377,11 @@ private:
+         }
+         if (decode_logits_ != nullptr) {
+             ggml_build_forward_expand(decode_graph_, decode_logits_);
+         }
++        if (decode_token_id_ != nullptr) {
++            ggml_build_forward_expand(decode_graph_, decode_token_id_);
++        }
+         if (decode_hidden_ != nullptr) {
+             ggml_build_forward_expand(decode_graph_, decode_hidden_);
+         }
+         decode_buffer_ = ggml_backend_alloc_ctx_tensors(decode_ctx_.get(), backend_);
+@@ -1564,8 +1587,12 @@ private:
+         if (status != GGML_STATUS_SUCCESS) {
+             throw std::runtime_error("QwenCausalDecodeRuntime decode graph compute failed");
+         }
+         QwenCausalDecodeStepResult out;
++        if (decode_token_id_ != nullptr) {
++            out.token_id.emplace();
++            ggml_backend_tensor_get(decode_token_id_, &*out.token_id, 0, sizeof(int32_t));
++        }
+         if (decode_logits_ != nullptr) {
+             out.logits.resize(static_cast<size_t>(ggml_nelements(decode_logits_)));
+             ggml_backend_tensor_get(decode_logits_, out.logits.data(), 0, out.logits.size() * sizeof(float));
+         }
+@@ -1609,8 +1636,13 @@ private:
+         ggml_backend_synchronize(backend_);
+         if (status != GGML_STATUS_SUCCESS) {
+             throw std::runtime_error("QwenCausalDecodeRuntime decode graph compute failed");
+         }
++        out.token_id.reset();
++        if (decode_token_id_ != nullptr) {
++            out.token_id.emplace();
++            ggml_backend_tensor_get(decode_token_id_, &*out.token_id, 0, sizeof(int32_t));
++        }
+         if (decode_logits_ != nullptr) {
+             out.logits.resize(static_cast<size_t>(ggml_nelements(decode_logits_)));
+             ggml_backend_tensor_get(decode_logits_, out.logits.data(), 0, out.logits.size() * sizeof(float));
+         } else {
+@@ -1784,8 +1816,9 @@ private:
+             hidden = layer.build_with_static_cache_block(ctx, block_graph_, hidden, positions,
+                 weights_.stack.layers[i], decode_cache_.key_tensor(i), decode_cache_.value_tensor(i),
+                 positions, mask).output;
+         }
++        auto * stack_output = hidden.tensor;
+         hidden = core::reshape_tensor(ctx, hidden,
+             core::TensorShape::from_dims({chunk, config_.decoder.stack.hidden_size}));
+         hidden = core::wrap_tensor(ggml_get_rows(ctx.ggml, hidden.tensor, block_last_),
+             core::TensorShape::from_dims({1, 1, config_.decoder.stack.hidden_size}), GGML_TYPE_F32);
+@@ -1803,29 +1836,50 @@ private:
+             }
+             block_logits_ = LinearModule({config_.decoder.stack.hidden_size, config_.decoder.logits_size,
+                 config_.decoder.use_lm_head_bias, config_.decoder.lm_head_precision})
+                 .build(ctx, hidden, *weights_.lm_head).tensor;
+-            ggml_set_output(block_logits_);
+-            ggml_build_forward_expand(block_graph_, block_logits_);
++            if (greedy_token_readback_enabled()) {
++                block_token_id_ = ggml_argmax(ctx.ggml, block_logits_);
++                block_token_id_->op_params[0] = 1;  // Opt in to generation's FIRST-max tie rule.
++                ggml_set_output(block_token_id_);
++                ggml_build_forward_expand(block_graph_, block_token_id_);
++            } else {
++                ggml_set_output(block_logits_);
++                ggml_build_forward_expand(block_graph_, block_logits_);
++            }
+         }
+         block_allocator_ = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend_));
+         if (!ggml_gallocr_alloc_graph(block_allocator_, block_graph_)) {
+             throw std::runtime_error("Qwen chunked prefill graph allocation failed");
+         }
++        // Share the full graph's allocated tensors, retaining every decoder KV update.
++        block_cache_graph_ = ggml_new_graph_custom(ctx.ggml, ggml_graph_n_nodes(block_graph_) + 1, false);
++        auto * anchor = ggml_view_1d(ctx.ggml, block_input_, ggml_nelements(block_input_), 0);
++        if (ggml_backend_view_init(anchor) != GGML_STATUS_SUCCESS) {
++            throw std::runtime_error("Qwen chunked prefill graph view initialization failed");
++        }
++        // CUDA keys captured graphs by their first node; this view gives the prefix its own key.
++        ggml_build_forward_expand(block_cache_graph_, anchor);
++        ggml_build_forward_expand(block_cache_graph_, stack_output);
+         block_steps_ = chunk;
+         debug::timing_log_scalar(config_.trace_name + ".block_prefill.graph.build_ms",
+                                  engine::debug::elapsed_ms(build_start, Clock::now()));
+     }
+ 
+     void release_block_graph() {
++        if (block_cache_graph_) {
++            core::release_backend_graph_resources(backend_, block_cache_graph_, config_.evict_cuda_graph_cache_on_release);
++        }
+         if (block_graph_) {
+             core::release_backend_graph_resources(backend_, block_graph_, config_.evict_cuda_graph_cache_on_release);
+         }
+         ggml_gallocr_free(block_allocator_);
+         block_allocator_ = nullptr;
+         block_ctx_.reset();
+         block_graph_ = nullptr;
++        block_cache_graph_ = nullptr;
+         block_logits_ = block_hidden_ = nullptr;
++        block_token_id_ = nullptr;
+         block_steps_ = 0;
+     }
+ 
+     void release_decode_graph() {
+@@ -1847,8 +1901,9 @@ private:
+         decode_cache_slot_ = nullptr;
+         decode_attention_mask_ = nullptr;
+         decode_logits_readback_token_ids_ = nullptr;
+         decode_logits_ = nullptr;
++        decode_token_id_ = nullptr;
+         decode_hidden_ = nullptr;
+         decode_graph_ = nullptr;
+         decode_cache_ = runtime::TransformerKVCache();
+         decode_attention_mask_values_.clear();
+@@ -1933,10 +1988,12 @@ private:
+     ggml_tensor * block_positions_ = nullptr;
+     ggml_tensor * block_mask_ = nullptr;
+     ggml_tensor * block_last_ = nullptr;
+     ggml_tensor * block_logits_ = nullptr;
++    ggml_tensor * block_token_id_ = nullptr;
+     ggml_tensor * block_hidden_ = nullptr;
+     ggml_cgraph * block_graph_ = nullptr;
++    ggml_cgraph * block_cache_graph_ = nullptr;
+     ggml_gallocr_t block_allocator_ = nullptr;
+     int64_t block_steps_ = 0;
+     std::unique_ptr<ggml_context, GgmlContextDeleter> decode_ctx_;
+     ggml_tensor * decode_input_ = nullptr;
+@@ -1944,8 +2001,9 @@ private:
+     ggml_tensor * decode_cache_slot_ = nullptr;
+     ggml_tensor * decode_attention_mask_ = nullptr;
+     ggml_tensor * decode_logits_readback_token_ids_ = nullptr;
+     ggml_tensor * decode_logits_ = nullptr;
++    ggml_tensor * decode_token_id_ = nullptr;
+     ggml_tensor * decode_hidden_ = nullptr;
+     ggml_cgraph * decode_graph_ = nullptr;
+     ggml_backend_buffer_t decode_buffer_ = nullptr;
+     std::vector<ggml_fp16_t> decode_attention_mask_values_;
+diff --git a/src/framework/runtime/greedy_qwen_decoder.cpp b/src/framework/runtime/greedy_qwen_decoder.cpp
+index bcbb5f5..1b1dad2 100644
+--- a/src/framework/runtime/greedy_qwen_decoder.cpp
++++ b/src/framework/runtime/greedy_qwen_decoder.cpp
+@@ -679,8 +679,9 @@ struct GreedyQwenDecoderRuntime::Impl {
+             config.decoder = spec.decoder;
+             config.prefill_graph_arena_bytes = prefill_graph_arena_bytes;
+             config.decode_graph_arena_bytes = decode_graph_arena_bytes;
+             config.evict_cuda_graph_cache_on_release = true;
++            config.greedy_token_readback = true;
+             const auto bound = bind_decoder_weights(weights->weights(), spec);
+             modules::QwenCausalDecodeRuntimeWeights bound_weights;
+             bound_weights.token_embedding = weights->weights().token_embedding;
+             bound_weights.stack = bound.stack;
+@@ -704,17 +705,18 @@ struct GreedyQwenDecoderRuntime::Impl {
+         // block-prefill graph. A new prompt clears KV on device, not via a
+         // host export/import of every layer.
+         const int64_t capacity = std::min(spec.max_position_embeddings, (required + 127) / 128 * 128);
+         const auto start = Clock::now();
+-        auto logits = reusable_decoder->prefill_embeddings_into_cache(embeddings, steps, capacity, 64).logits;
++        auto result = reusable_decoder->prefill_embeddings_into_cache(
++            embeddings, steps, capacity, spec.prefill_chunk_steps);
+         debug::timing_log_scalar("greedy_qwen_decoder.reusable.prefill_ms", engine::debug::elapsed_ms(start));
+         std::vector<int32_t> out;
+         for (int64_t step = 0; step < max_new_tokens; ++step) {
+-            const int32_t token = argmax_index(logits);
++            const int32_t token = result.token_id.has_value() ? *result.token_id : argmax_index(result.logits);
+             if (is_eos(spec, token)) { break; }
+             out.push_back(token);
+             if (step + 1 < max_new_tokens) {
+-                logits = reusable_decoder->decode_token(token).logits;
++                result = reusable_decoder->decode_token(token);
+             }
+         }
+         return out;
+     }
+diff --git a/src/models/qwen3_asr/thinker.cpp b/src/models/qwen3_asr/thinker.cpp
+index 17a4fa3..15288fd 100644
+--- a/src/models/qwen3_asr/thinker.cpp
++++ b/src/models/qwen3_asr/thinker.cpp
+@@ -12,9 +12,9 @@
+ #include "engine/framework/modules/positional_modules.h"
+ #include "engine/framework/modules/primitive_modules.h"
+ #include "engine/framework/modules/structural_modules.h"
+ #include "engine/framework/runtime/errors.h"
+-#include "engine/framework/runtime/kv_cache.h"
++#include "engine/framework/runtime/greedy_qwen_decoder.h"
+ #include "engine/framework/sampling/decode_modules.h"
+ 
+ 
+ #include <ggml-backend.h>
+@@ -66,13 +66,8 @@ struct ThinkerWeights {
+     core::TensorValue norm;
+     core::TensorValue lm_head;
+ };
+ 
+-struct PrefillOutput {
+-    std::vector<float> logits;
+-    runtime::TransformerKVState kv_state;
+-};
+-
+ modules::QwenDecoderLayerWeights to_qwen_layer_weights(const TextLayerWeights & weights) {
+     modules::QwenDecoderLayerWeights out;
+     out.input_norm = {weights.input_norm, std::nullopt};
+     out.self_attention.q_weight = weights.q_proj;
+@@ -124,8 +119,31 @@ int64_t head_dim(const Qwen3ASRTextDecoderConfig & config) {
+     }
+     return config.head_dim;
+ }
+ 
++runtime::GreedyQwenDecoderSpec make_decoder_spec(const Qwen3ASRConfig & config) {
++    const auto & text = config.text_decoder;
++    runtime::GreedyQwenDecoderSpec spec;
++    spec.decoder = make_qwen_decoder_config(text, modules::QwenCausalDecoderLogitsMode::LastStep);
++    spec.decoder.stack.head_dim = head_dim(text);
++    spec.decoder.stack.runtime.attention.static_mode = modules::QwenDecoderAttentionMode::FlashGroupedViewKV;
++    spec.vocab_size = text.vocab_size;
++    spec.max_position_embeddings = text.max_position_embeddings;
++    // Legacy GGUFs keep a separately quantized output head even when the
++    // original checkpoint declares tied embeddings.
++    spec.tie_word_embeddings = config.hf_transformers_layout && config.tie_word_embeddings;
++    spec.attention_bias = false;
++    spec.packed_qkv = false;
++    const std::string prefix = config.hf_transformers_layout ? "model.language_model" : "thinker.model";
++    spec.token_embedding_tensor = prefix + ".embed_tokens.weight";
++    spec.final_norm_tensor = prefix + ".norm.weight";
++    spec.layer_prefix = prefix + ".layers";
++    spec.lm_head_tensor = config.hf_transformers_layout ? "lm_head.weight" : "thinker.lm_head.weight";
++    spec.eos_token_ids = text.eos_token_ids;
++    spec.prefill_chunk_steps = 1024;
++    return spec;
++}
++
+ core::TensorValue prompt_embeddings(
+     core::ModuleBuildContext & ctx,
+     const ThinkerWeights & weights,
+     const Qwen3ASRTextDecoderConfig & config,
+@@ -212,26 +230,8 @@ ThinkerWeights load_weights(
+     weights.store->upload();
+     return weights;
+ }
+ 
+-int32_t argmax_index(const std::vector<float> & values) {
+-    if (values.empty()) {
+-        throw std::runtime_error("Qwen3 ASR thinker cannot select from empty logits");
+-    }
+-    size_t best = 0;
+-    for (size_t i = 1; i < values.size(); ++i) {
+-        if (values[i] > values[best]) {
+-            best = i;
+-        }
+-    }
+-    return static_cast<int32_t>(best);
+-}
+-
+-bool is_eos(const Qwen3ASRTextDecoderConfig & config, int32_t token) {
+-    return std::find(config.eos_token_ids.begin(), config.eos_token_ids.end(), static_cast<int64_t>(token)) !=
+-        config.eos_token_ids.end();
+-}
+-
+ class ThinkerWeightsRuntime {
+ public:
+     ThinkerWeightsRuntime(
+         std::shared_ptr<const Qwen3ASRAssets> assets,
+@@ -286,198 +286,8 @@ struct GgmlGallocrDeleter {
+         }
+     }
+ };
+ 
+-class PrefillGraph {
+-public:
+-    PrefillGraph(
+-        std::shared_ptr<ThinkerWeightsRuntime> runtime,
+-        int64_t prompt_steps,
+-        int64_t audio_tokens,
+-        size_t graph_arena_bytes)
+-        : runtime_(std::move(runtime)),
+-          prompt_steps_(prompt_steps),
+-          audio_tokens_(audio_tokens) {
+-        if (prompt_steps_ <= 0) {
+-            throw std::runtime_error("Qwen3 ASR thinker prefill requires positive prompt length");
+-        }
+-        if (audio_tokens_ < 0 || audio_tokens_ > prompt_steps_) {
+-            throw std::runtime_error("Qwen3 ASR thinker prefill audio token count is invalid");
+-        }
+-        const auto build_start = Clock::now();
+-        ggml_init_params params{graph_arena_bytes, nullptr, true};
+-        ctx_.reset(ggml_init(params));
+-        if (ctx_ == nullptr) {
+-            throw std::runtime_error("failed to initialize Qwen3 ASR thinker prefill graph context");
+-        }
+-        const auto & config = runtime_->assets().config.text_decoder;
+-        const auto & weights = runtime_->weights();
+-        core::ModuleBuildContext ctx{ctx_.get(), "qwen3_asr.thinker.prefill", runtime_->backend_type()};
+-        token_ids_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, prompt_steps_);
+-        audio_embeddings_ = ggml_new_tensor_2d(ctx_.get(), GGML_TYPE_F32, config.hidden_size, std::max<int64_t>(audio_tokens_, 1));
+-        audio_positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I64, std::max<int64_t>(audio_tokens_, 1));
+-        auto x = prompt_embeddings(
+-            ctx,
+-            weights,
+-            config,
+-            token_ids_,
+-            audio_embeddings_,
+-            audio_positions_,
+-            prompt_steps_,
+-            audio_tokens_);
+-        positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, prompt_steps_);
+-        auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({prompt_steps_}), GGML_TYPE_I32);
+-
+-        const auto decoder_weights = make_qwen_decoder_weights(weights);
+-        auto decoder_out = modules::QwenCausalDecoderModule(
+-                               make_qwen_decoder_config(config, modules::QwenCausalDecoderLogitsMode::LastStep))
+-                               .build(ctx, x, positions, decoder_weights);
+-        for (const auto & layer : decoder_out.state.layers) {
+-            if (!layer.key.has_value() || !layer.value.has_value()) {
+-                throw std::runtime_error("Qwen3 ASR thinker prefill decoder did not return K/V state");
+-            }
+-            // The graph allocator recycles intermediates, and the decoder K/V is an
+-            // intermediate that run() has to read back afterwards. Copy each one into
+-            // a tensor of its own and mark it as a graph output, which is what keeps
+-            // it off the reuse list. Same shape as QwenCausalDecodeRuntime prefill.
+-            auto * key = ggml_cpy(
+-                ctx_.get(),
+-                layer.key->tensor,
+-                ggml_dup_tensor(ctx_.get(), layer.key->tensor));
+-            auto * value = ggml_cpy(
+-                ctx_.get(),
+-                layer.value->tensor,
+-                ggml_dup_tensor(ctx_.get(), layer.value->tensor));
+-            ggml_set_output(key);
+-            ggml_set_output(value);
+-            keys_.push_back(key);
+-            values_.push_back(value);
+-        }
+-        logits_ = decoder_out.logits.tensor;
+-        ggml_set_output(logits_);
+-        graph_ = ggml_new_graph_custom(ctx_.get(), 65536, false);
+-        ggml_build_forward_expand(graph_, logits_);
+-        for (auto * key : keys_) {
+-            ggml_build_forward_expand(graph_, key);
+-        }
+-        for (auto * value : values_) {
+-            ggml_build_forward_expand(graph_, value);
+-        }
+-        // unique_ptr so a throw below (or from later ctor statements) frees
+-        // whatever the allocator already reserved; a throwing constructor
+-        // runs no destructor, and each failed rebuild used to leak its
+-        // partially reserved arena
+-        const auto try_alloc = [&]() {
+-            gallocr_.reset(ggml_gallocr_new(ggml_backend_get_default_buffer_type(runtime_->backend())));
+-            return gallocr_ != nullptr &&
+-                ggml_gallocr_reserve(gallocr_.get(), graph_) &&
+-                ggml_gallocr_alloc_graph(gallocr_.get(), graph_);
+-        };
+-        // On failure the device may simply be full of idle cached pool
+-        // buffers (the legacy pool never shrinks on its own); trim and retry
+-        // once before declaring the size impossible
+-        if (!try_alloc() &&
+-            (engine::core::trim_backend_pools(runtime_->backend()), !try_alloc())) {
+-            // Size, not a fault: the graph scales with prompt_steps_, which the
+-            // caller controls through the transcription prompt and the length of
+-            // the audio. Say which, and by how much, so the remedy is obvious.
+-            throw engine::runtime::CapacityError(
+-                "Qwen3 ASR prefill graph does not fit in device memory at this size ("
+-                + std::to_string(prompt_steps_) + " prompt steps, of which "
+-                + std::to_string(audio_tokens_) + " are audio tokens); "
+-                "shorten the transcription prompt or the audio");
+-        }
+-        position_ids_ = modules::qwen_position_ids(prompt_steps_);
+-        debug::timing_log_scalar("qwen3_asr.thinker.prefill.graph.build_ms", engine::debug::elapsed_ms(build_start, Clock::now()));
+-        debug::trace_log_scalar("qwen3_asr.thinker.prefill_prompt_steps", prompt_steps_);
+-    }
+-
+-    ~PrefillGraph() {
+-        engine::core::release_backend_graph_resources(runtime_->backend(), graph_, true);
+-    }
+-
+-    bool matches(const ThinkerWeightsRuntime & runtime, int64_t prompt_steps, int64_t audio_tokens) const {
+-        return runtime_.get() == &runtime && prompt_steps_ == prompt_steps && audio_tokens_ == audio_tokens;
+-    }
+-
+-    PrefillOutput run(
+-        const std::vector<int32_t> & token_ids,
+-        const std::vector<float> & audio_embeddings,
+-        const std::vector<int32_t> & audio_positions) {
+-        const auto & config = runtime_->assets().config.text_decoder;
+-        if (static_cast<int64_t>(token_ids.size()) != prompt_steps_) {
+-            throw std::runtime_error("Qwen3 ASR thinker prefill token id count mismatch");
+-        }
+-        if (static_cast<int64_t>(audio_embeddings.size()) != audio_tokens_ * config.hidden_size) {
+-            throw std::runtime_error("Qwen3 ASR thinker prefill audio embedding size mismatch");
+-        }
+-        if (static_cast<int64_t>(audio_positions.size()) != audio_tokens_) {
+-            throw std::runtime_error("Qwen3 ASR thinker prefill audio position count mismatch");
+-        }
+-        auto timing_start = Clock::now();
+-        // Re-uploaded on every run: the graph allocator may hand this leaf out to a
+-        // later node once the graph has consumed it, so it cannot be written once at
+-        // build time and left alone.
+-        ggml_backend_tensor_set(positions_, position_ids_.data(), 0, position_ids_.size() * sizeof(int32_t));
+-        ggml_backend_tensor_set(token_ids_, token_ids.data(), 0, token_ids.size() * sizeof(int32_t));
+-        if (audio_tokens_ > 0) {
+-            std::vector<int64_t> positions(audio_positions.begin(), audio_positions.end());
+-            ggml_backend_tensor_set(
+-                audio_embeddings_,
+-                audio_embeddings.data(),
+-                0,
+-                audio_embeddings.size() * sizeof(float));
+-            ggml_backend_tensor_set(
+-                audio_positions_,
+-                positions.data(),
+-                0,
+-                positions.size() * sizeof(int64_t));
+-        }
+-        debug::timing_log_scalar("qwen3_asr.thinker.prefill_input_upload_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+-        core::set_backend_threads(runtime_->backend(), runtime_->threads());
+-        timing_start = Clock::now();
+-        const ggml_status status = engine::core::compute_backend_graph(runtime_->backend(), graph_);
+-        ggml_backend_synchronize(runtime_->backend());
+-        debug::timing_log_scalar("qwen3_asr.thinker.prefill.graph.compute_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+-        if (status != GGML_STATUS_SUCCESS) {
+-            throw std::runtime_error("Qwen3 ASR thinker prefill graph compute failed");
+-        }
+-        PrefillOutput out;
+-        out.logits.resize(static_cast<size_t>(config.output_size));
+-        timing_start = Clock::now();
+-        ggml_backend_tensor_get(logits_, out.logits.data(), 0, out.logits.size() * sizeof(float));
+-        out.kv_state.current_end = prompt_steps_;
+-        out.kv_state.layers.resize(keys_.size());
+-        const size_t layer_values = static_cast<size_t>(prompt_steps_ * config.num_key_value_heads * head_dim(config));
+-        for (size_t layer = 0; layer < keys_.size(); ++layer) {
+-            auto & state = out.kv_state.layers[layer];
+-            state.valid_steps = prompt_steps_;
+-            state.key.resize(layer_values);
+-            state.value.resize(layer_values);
+-            ggml_backend_tensor_get(keys_[layer], state.key.data(), 0, state.key.size() * sizeof(float));
+-            ggml_backend_tensor_get(values_[layer], state.value.data(), 0, state.value.size() * sizeof(float));
+-        }
+-        debug::timing_log_scalar("qwen3_asr.thinker.prefill_output_read_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+-        return out;
+-    }
+-
+-private:
+-    std::shared_ptr<ThinkerWeightsRuntime> runtime_;
+-    int64_t prompt_steps_ = 0;
+-    int64_t audio_tokens_ = 0;
+-    std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
+-    ggml_tensor * token_ids_ = nullptr;
+-    ggml_tensor * audio_embeddings_ = nullptr;
+-    ggml_tensor * audio_positions_ = nullptr;
+-    ggml_tensor * positions_ = nullptr;
+-    ggml_tensor * logits_ = nullptr;
+-    std::vector<ggml_tensor *> keys_;
+-    std::vector<ggml_tensor *> values_;
+-    std::vector<int32_t> position_ids_;
+-    ggml_cgraph * graph_ = nullptr;
+-    std::unique_ptr<std::remove_pointer_t<ggml_gallocr_t>, GgmlGallocrDeleter> gallocr_;
+-};
+-
+ class PromptClassificationGraph {
+ public:
+     PromptClassificationGraph(
+         std::shared_ptr<ThinkerWeightsRuntime> runtime,
+@@ -562,9 +372,9 @@ public:
+         if (static_cast<int64_t>(audio_positions.size()) != audio_tokens_) {
+             throw std::runtime_error("Qwen3 ASR thinker classification audio position count mismatch");
+         }
+         auto timing_start = Clock::now();
+-        // See PrefillGraph::run: leaves are not pinned by the graph allocator.
++        // Graph leaves are not pinned by the graph allocator.
+         ggml_backend_tensor_set(positions_, position_ids_.data(), 0, position_ids_.size() * sizeof(int32_t));
+         ggml_backend_tensor_set(token_ids_input_, input_ids.data(), 0, input_ids.size() * sizeof(int32_t));
+         if (audio_tokens_ > 0) {
+             std::vector<int64_t> positions(audio_positions.begin(), audio_positions.end());
+@@ -609,126 +419,8 @@ private:
+     ggml_cgraph * graph_ = nullptr;
+     std::unique_ptr<std::remove_pointer_t<ggml_gallocr_t>, GgmlGallocrDeleter> gallocr_;
+ };
+ 
+-class DecodeGraph {
+-public:
+-    DecodeGraph(std::shared_ptr<ThinkerWeightsRuntime> runtime, int64_t cache_steps, size_t graph_arena_bytes)
+-        : runtime_(std::move(runtime)),
+-          cache_steps_(cache_steps) {
+-        if (cache_steps_ <= 0) {
+-            throw std::runtime_error("Qwen3 ASR thinker decode requires positive cache length");
+-        }
+-        const auto build_start = Clock::now();
+-        ggml_init_params params{graph_arena_bytes, nullptr, true};
+-        ctx_.reset(ggml_init(params));
+-        if (ctx_ == nullptr) {
+-            throw std::runtime_error("failed to initialize Qwen3 ASR thinker decode graph context");
+-        }
+-        const auto & config = runtime_->assets().config.text_decoder;
+-        const auto & weights = runtime_->weights();
+-        core::ModuleBuildContext ctx{ctx_.get(), "qwen3_asr.thinker.decode", runtime_->backend_type()};
+-        token_id_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, 1);
+-        auto token_id = core::wrap_tensor(token_id_, core::TensorShape::from_dims({1}), GGML_TYPE_I32);
+-        auto x = modules::EmbeddingModule({config.vocab_size, config.hidden_size})
+-                     .build(ctx, token_id, weights.token_embedding);
+-        x = core::reshape_tensor(ctx, x, core::TensorShape::from_dims({1, 1, config.hidden_size}));
+-        positions_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, 1);
+-        auto positions = core::wrap_tensor(positions_, core::TensorShape::from_dims({1}), GGML_TYPE_I32);
+-        cache_slot_ = ggml_new_tensor_1d(ctx_.get(), GGML_TYPE_I32, 1);
+-        auto cache_slot = core::wrap_tensor(cache_slot_, core::TensorShape::from_dims({1}), GGML_TYPE_I32);
+-        attention_mask_ = ggml_new_tensor_4d(ctx_.get(), GGML_TYPE_F16, cache_steps_, 1, 1, 1);
+-        auto attention_mask = core::wrap_tensor(
+-            attention_mask_,
+-            core::TensorShape::from_dims({1, 1, 1, cache_steps_}),
+-            GGML_TYPE_F16);
+-        graph_ = ggml_new_graph_custom(ctx_.get(), 65536, false);
+-        auto decoder_out = modules::QwenCausalDecoderModule(
+-                               make_qwen_decoder_config(config, modules::QwenCausalDecoderLogitsMode::LastStep))
+-                               .build_static_cache_tail(
+-                                   ctx,
+-                                   graph_,
+-                                   x,
+-                                   positions,
+-                                   make_qwen_decoder_weights(weights),
+-                                   cache_steps_,
+-                                   attention_mask,
+-                                   cache_slot);
+-        step_cache_ = std::move(decoder_out.cache);
+-        logits_ = decoder_out.logits.tensor;
+-        ggml_set_output(logits_);
+-        ggml_build_forward_expand(graph_, logits_);
+-        buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), runtime_->backend());
+-        if (buffer_ == nullptr) {
+-            engine::core::trim_backend_pools(runtime_->backend());
+-            buffer_ = ggml_backend_alloc_ctx_tensors(ctx_.get(), runtime_->backend());
+-        }
+-        if (buffer_ == nullptr) {
+-            throw std::runtime_error("failed to allocate Qwen3 ASR thinker decode graph");
+-        }
+-        attention_mask_values_.assign(static_cast<size_t>(cache_steps_), ggml_fp32_to_fp16(-INFINITY));
+-        debug::timing_log_scalar("qwen3_asr.thinker.decode.graph.build_ms", engine::debug::elapsed_ms(build_start, Clock::now()));
+-        debug::trace_log_scalar("qwen3_asr.thinker.decode_cache_steps", cache_steps_);
+-    }
+-
+-    ~DecodeGraph() {
+-        engine::core::release_backend_graph_resources(runtime_->backend(), graph_, true);
+-        if (buffer_ != nullptr) {
+-            ggml_backend_buffer_free(buffer_);
+-        }
+-    }
+-
+-    bool can_run(const ThinkerWeightsRuntime & runtime, int64_t required_steps) const {
+-        return runtime_.get() == &runtime && cache_steps_ >= required_steps;
+-    }
+-
+-    void import_state(const runtime::TransformerKVState & state) {
+-        step_cache_.import_state(state);
+-    }
+-
+-    std::vector<float> run_step(int32_t token) {
+-        const auto & config = runtime_->assets().config.text_decoder;
+-        if (step_cache_.valid_steps() >= cache_steps_) {
+-            throw std::runtime_error("Qwen3 ASR thinker decode cache exhausted");
+-        }
+-        ggml_backend_tensor_set(token_id_, &token, 0, sizeof(int32_t));
+-        const int32_t position = static_cast<int32_t>(step_cache_.current_end());
+-        ggml_backend_tensor_set(positions_, &position, 0, sizeof(int32_t));
+-        const int32_t cache_slot = static_cast<int32_t>(step_cache_.valid_steps());
+-        ggml_backend_tensor_set(cache_slot_, &cache_slot, 0, sizeof(int32_t));
+-        modules::write_qwen_cached_step_mask(
+-            attention_mask_,
+-            attention_mask_values_,
+-            cache_steps_,
+-            step_cache_.valid_steps(),
+-            step_cache_.valid_steps());
+-        core::set_backend_threads(runtime_->backend(), runtime_->threads());
+-        const ggml_status status = engine::core::compute_backend_graph(runtime_->backend(), graph_);
+-        ggml_backend_synchronize(runtime_->backend());
+-        if (status != GGML_STATUS_SUCCESS) {
+-            throw std::runtime_error("Qwen3 ASR thinker decode graph compute failed");
+-        }
+-        std::vector<float> logits(static_cast<size_t>(config.output_size));
+-        ggml_backend_tensor_get(logits_, logits.data(), 0, logits.size() * sizeof(float));
+-        step_cache_.advance_after_direct_append(1);
+-        return logits;
+-    }
+-
+-private:
+-    std::shared_ptr<ThinkerWeightsRuntime> runtime_;
+-    int64_t cache_steps_ = 0;
+-    std::unique_ptr<ggml_context, GgmlContextDeleter> ctx_;
+-    ggml_tensor * token_id_ = nullptr;
+-    ggml_tensor * positions_ = nullptr;
+-    ggml_tensor * cache_slot_ = nullptr;
+-    ggml_tensor * attention_mask_ = nullptr;
+-    ggml_tensor * logits_ = nullptr;
+-    std::vector<ggml_fp16_t> attention_mask_values_;
+-    runtime::TransformerKVCache step_cache_;
+-    ggml_cgraph * graph_ = nullptr;
+-    ggml_backend_buffer_t buffer_ = nullptr;
+-};
+-
+ }  // namespace
+ 
+ struct Qwen3ASRThinkerRuntime::Impl {
+     Impl(
+@@ -737,20 +429,38 @@ struct Qwen3ASRThinkerRuntime::Impl {
+         size_t prefill_graph_arena_bytes,
+         size_t decode_graph_arena_bytes,
+         size_t weight_context_bytes,
+         assets::TensorStorageType storage_type)
+-        : weights(std::make_shared<ThinkerWeightsRuntime>(
+-              std::move(assets),
+-              execution,
+-              weight_context_bytes,
+-              storage_type)),
++        : model_assets(assets != nullptr ? std::move(assets) :
++              throw std::runtime_error("Qwen3 ASR thinker weights runtime requires assets")),
++          execution(execution),
+           prefill_graph_arena_bytes(prefill_graph_arena_bytes),
+-          decode_graph_arena_bytes(decode_graph_arena_bytes) {}
++          decode_graph_arena_bytes(decode_graph_arena_bytes),
++          weight_context_bytes(weight_context_bytes),
++          weight_storage_type(storage_type) {
++        if (execution.backend() == nullptr) {
++            throw std::runtime_error("Qwen3 ASR thinker backend is not initialized");
++        }
++        if (model_assets->config.thinker_model_type != "qwen3_forced_aligner") {
++            generation_decoder();
++        }
++    }
++
++    runtime::GreedyQwenDecoderRuntime & generation_decoder() {
++        if (decoder == nullptr) {
++            decoder = std::make_unique<runtime::GreedyQwenDecoderRuntime>(
++                model_assets->model_weights, make_decoder_spec(model_assets->config), execution,
++                prefill_graph_arena_bytes, decode_graph_arena_bytes,
++                weight_context_bytes, weight_storage_type);
++            model_assets->model_weights->release_storage();
++        }
++        return *decoder;
++    }
+ 
+     void validate_prompt_audio(
+         const Qwen3ASRPrompt & prompt,
+         const Qwen3ASRAudioEmbeddings & audio_embeddings) const {
+-        const auto & config = weights->assets().config.text_decoder;
++        const auto & config = model_assets->config.text_decoder;
+         if (audio_embeddings.hidden_size != config.hidden_size) {
+             throw std::runtime_error("Qwen3 ASR audio embedding hidden size mismatch");
+         }
+         if (audio_embeddings.tokens != static_cast<int64_t>(prompt.audio_token_positions.size())) {
+@@ -769,9 +479,9 @@ struct Qwen3ASRThinkerRuntime::Impl {
+     Qwen3ASRGeneratedTokens generate(
+         const Qwen3ASRPrompt & prompt,
+         const Qwen3ASRAudioEmbeddings & audio_embeddings,
+         const Qwen3ASRGenerationOptions & options) {
+-        const auto & config = weights->assets().config.text_decoder;
++        const auto & config = model_assets->config.text_decoder;
+         if (prompt.input_ids.empty()) {
+             throw std::runtime_error("Qwen3 ASR thinker prompt is empty");
+         }
+         if (options.max_new_tokens <= 0) {
+@@ -780,60 +490,23 @@ struct Qwen3ASRThinkerRuntime::Impl {
+         const int64_t prompt_steps = static_cast<int64_t>(prompt.input_ids.size());
+         if (prompt_steps + options.max_new_tokens > config.max_position_embeddings) {
+             throw std::runtime_error("Qwen3 ASR thinker request exceeds max_position_embeddings");
+         }
+-        auto timing_start = Clock::now();
+         validate_prompt_audio(prompt, audio_embeddings);
+-        debug::timing_log_scalar("qwen3_asr.thinker.prompt_prepare_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+-        if (prefill_graph == nullptr || !prefill_graph->matches(*weights, prompt_steps, audio_embeddings.tokens)) {
+-            // drop the old graph (and its cuda_graphs cache entry) before
+-            // allocating the replacement: assigning over a live unique_ptr
+-            // holds both arenas at once at the rebuild peak
+-            prefill_graph.reset();
+-            prefill_graph = std::make_unique<PrefillGraph>(
+-                weights,
+-                prompt_steps,
+-                audio_embeddings.tokens,
+-                prefill_graph_arena_bytes);
+-        } else {
+-            debug::timing_log_scalar("qwen3_asr.thinker.prefill.graph.build_ms", 0.0);
+-            debug::trace_log_scalar("qwen3_asr.thinker.prefill_prompt_steps", prompt_steps);
+-        }
+-        timing_start = Clock::now();
+-        auto prefill = prefill_graph->run(
+-            prompt.input_ids,
+-            audio_embeddings.values,
+-            prompt.audio_token_positions);
+-        debug::timing_log_scalar("qwen3_asr.thinker.prefill_total_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+-        const int64_t required_cache_steps = prompt_steps + options.max_new_tokens;
+-        if (decode_graph == nullptr || !decode_graph->can_run(*weights, required_cache_steps)) {
+-            decode_graph.reset();
+-            decode_graph = std::make_unique<DecodeGraph>(weights, required_cache_steps, decode_graph_arena_bytes);
+-        } else {
+-            debug::timing_log_scalar("qwen3_asr.thinker.decode.graph.build_ms", 0.0);
+-            debug::trace_log_scalar("qwen3_asr.thinker.decode_cache_steps", required_cache_steps);
+-        }
+-        decode_graph->import_state(prefill.kv_state);
+-
++        runtime::GreedyQwenDecoderRuntime::Prompt decoder_prompt;
++        decoder_prompt.input_ids = prompt.input_ids;
++        decoder_prompt.injection.values = audio_embeddings.values;
++        decoder_prompt.injection.tokens = audio_embeddings.tokens;
++        decoder_prompt.injection.positions = prompt.audio_token_positions;
+         Qwen3ASRGeneratedTokens out;
+-        std::vector<float> logits = std::move(prefill.logits);
+-        timing_start = Clock::now();
+-        for (int64_t step = 0; step < options.max_new_tokens; ++step) {
+-            const int32_t token = argmax_index(logits);
+-            if (is_eos(config, token)) {
+-                break;
+-            }
+-            out.token_ids.push_back(token);
+-            logits = decode_graph->run_step(token);
+-        }
+-        debug::timing_log_scalar("qwen3_asr.thinker.decode_total_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
++        out.token_ids = generation_decoder().generate(decoder_prompt, options.max_new_tokens, true);
+         return out;
+     }
+ 
+     std::vector<int32_t> classify_prompt(
+         const Qwen3ASRPrompt & prompt,
+         const Qwen3ASRAudioEmbeddings & audio_embeddings) {
+-        const auto & config = weights->assets().config.text_decoder;
++        const auto & config = model_assets->config.text_decoder;
+         if (prompt.input_ids.empty()) {
+             throw std::runtime_error("Qwen3 ASR thinker classification prompt is empty");
+         }
+         const int64_t prompt_steps = static_cast<int64_t>(prompt.input_ids.size());
+@@ -842,8 +515,13 @@ struct Qwen3ASRThinkerRuntime::Impl {
+         }
+         auto timing_start = Clock::now();
+         validate_prompt_audio(prompt, audio_embeddings);
+         debug::timing_log_scalar("qwen3_asr.thinker.classify_prompt_prepare_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
++        if (weights == nullptr) {
++            weights = std::make_shared<ThinkerWeightsRuntime>(
++                model_assets, execution, weight_context_bytes, weight_storage_type);
++            model_assets->model_weights->release_storage();
++        }
+         if (classification_graph == nullptr ||
+             !classification_graph->matches(*weights, prompt_steps, audio_embeddings.tokens)) {
+             classification_graph.reset();
+             classification_graph = std::make_unique<PromptClassificationGraph>(
+@@ -863,13 +541,16 @@ struct Qwen3ASRThinkerRuntime::Impl {
+         debug::timing_log_scalar("qwen3_asr.thinker.classify_total_ms", engine::debug::elapsed_ms(timing_start, Clock::now()));
+         return token_ids;
+     }
+ 
+-    std::shared_ptr<ThinkerWeightsRuntime> weights;
++    std::shared_ptr<const Qwen3ASRAssets> model_assets;
++    core::ExecutionContext & execution;
+     size_t prefill_graph_arena_bytes = 0;
+     size_t decode_graph_arena_bytes = 0;
+-    std::unique_ptr<PrefillGraph> prefill_graph;
+-    std::unique_ptr<DecodeGraph> decode_graph;
++    size_t weight_context_bytes = 0;
++    assets::TensorStorageType weight_storage_type;
++    std::unique_ptr<runtime::GreedyQwenDecoderRuntime> decoder;
++    std::shared_ptr<ThinkerWeightsRuntime> weights;
+     std::unique_ptr<PromptClassificationGraph> classification_graph;
+ };
+ 
+ Qwen3ASRThinkerRuntime::Qwen3ASRThinkerRuntime(

@@ -5,14 +5,13 @@ use tauri::Emitter;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::services::jev_service::JevProvider;
 use crate::services::llm_client::{LlmImageInput, LlmRequestOptions};
 use crate::services::{
     codex_oauth_service, grok_build_oauth_service, jev_service, llm_client, llm_provider,
     profile_service, screen_capture_service, screen_vision_service,
 };
 use crate::state::user_profile::{
-    CorrectionSource, LlmReasoningMode, PolishStructureLevel, UserProfile,
+    CorrectionSource, JevConfig, LlmReasoningMode, PolishStructureLevel, UserProfile,
 };
 use crate::state::AppState;
 use crate::utils::foreground::ForegroundApp;
@@ -798,7 +797,7 @@ pub(crate) async fn evaluate_polish_gate(
     state: &AppState,
     text: &str,
     overrides: &PolishOverrides,
-    provider: JevProvider,
+    config: &JevConfig,
     api_key: &str,
     endpoint_override: Option<String>,
 ) -> Option<PolishOutcome> {
@@ -814,7 +813,7 @@ pub(crate) async fn evaluate_polish_gate(
                 profile.translation_target.clone(),
             )
         });
-    if !enabled || configured_provider != provider {
+    if !enabled || configured_provider != config.provider {
         return None;
     }
 
@@ -836,7 +835,7 @@ pub(crate) async fn evaluate_polish_gate(
     );
     jev_service::evaluate(
         &state.http_client,
-        provider,
+        config,
         api_key,
         text,
         &policy,
@@ -858,7 +857,7 @@ async fn evaluate_polish_expansion(
     state: &AppState,
     text: &str,
     overrides: &PolishOverrides,
-    provider: JevProvider,
+    config: &JevConfig,
     api_key: &str,
     endpoint_override: Option<&str>,
 ) -> Option<JevPolishDecision> {
@@ -875,7 +874,7 @@ async fn evaluate_polish_expansion(
                 profile.translation_target.clone(),
             )
         });
-    if configured_provider != provider {
+    if configured_provider != config.provider {
         return None;
     }
 
@@ -927,7 +926,7 @@ async fn evaluate_polish_expansion(
     });
     let payload = crate::services::jev_tasks::evaluate(
         &state.http_client,
-        provider,
+        config,
         api_key,
         state_payload,
         Value::Object(questions),
@@ -984,7 +983,7 @@ async fn evaluate_polish_expansion(
         .and_then(Value::as_f64);
     log::info!(
         "Decision model routing: provider={:?}, route={:?}, pass_probability={:?}, screen={:?}, unneeded_probability={:?}, explicit_screen={}, skip_polish={}",
-        provider, route.as_deref(), pass_probability, screen_choice, unneeded_probability, explicit_screen, skip_polish
+        config.provider, route.as_deref(), pass_probability, screen_choice, unneeded_probability, explicit_screen, skip_polish
     );
     Some(JevPolishDecision {
         skip_polish,
@@ -1014,15 +1013,13 @@ pub async fn polish_text_with_overrides_detailed(
     }
 
     let start = std::time::Instant::now();
-    let (jev_enabled, screen_routing) =
-        state.with_profile(|profile| (profile.jev.enabled, profile.jev.screen_routing));
+    let jev_config = state.with_profile(|profile| profile.jev.clone());
     let mut expansion_applied = false;
-    if overrides.allow_jev_gate && screen_routing {
-        let jev_provider = state.with_profile(|profile| profile.jev.provider);
-        let jev_api_key =
-            jev_service::load_api_key_for_provider(app_handle, jev_provider).unwrap_or_default();
+    if overrides.allow_jev_gate && jev_config.screen_routing {
+        let jev_api_key = jev_service::load_api_key_for_provider(app_handle, jev_config.provider)
+            .unwrap_or_default();
         if let Some(decision) =
-            evaluate_polish_expansion(state, text, &overrides, jev_provider, &jev_api_key, None)
+            evaluate_polish_expansion(state, text, &overrides, &jev_config, &jev_api_key, None)
                 .await
         {
             expansion_applied = true;
@@ -1035,12 +1032,11 @@ pub async fn polish_text_with_overrides_detailed(
             }
         }
     }
-    if overrides.allow_jev_gate && jev_enabled && !expansion_applied {
-        let jev_provider = state.with_profile(|profile| profile.jev.provider);
-        let jev_api_key =
-            jev_service::load_api_key_for_provider(app_handle, jev_provider).unwrap_or_default();
+    if overrides.allow_jev_gate && jev_config.enabled && !expansion_applied {
+        let jev_api_key = jev_service::load_api_key_for_provider(app_handle, jev_config.provider)
+            .unwrap_or_default();
         if let Some(outcome) =
-            evaluate_polish_gate(state, text, &overrides, jev_provider, &jev_api_key, None).await
+            evaluate_polish_gate(state, text, &overrides, &jev_config, &jev_api_key, None).await
         {
             return Ok(outcome);
         }

@@ -38,7 +38,7 @@
 
 | 引擎 | 处理方式 | 配置 |
 |:--|:--|:--|
-| **Qwen3-ASR 0.6B Q8** | 本地 · CUDA / Vulkan / CPU | 下载约 850 MB 模型；多语言听写。 |
+| **Qwen3-ASR 0.6B Q8** | 本地 · CUDA / CPU | 下载约 1.15 GB 模型；多语言听写。 |
 | **Confucius4-R2T2 Q8** | 本地 · CUDA / CPU | 下载约 2.48 GB 模型；原生流式，支持语言与主题提示。 |
 | **GLM-ASR** | 云端 · 最终结果 | API Key 与区域。 |
 | **阿里 DashScope** | 云端 · 最终结果 | API Key、区域与模型。 |
@@ -50,7 +50,7 @@
 
 润色与助手可以共用模型，也可以分别设置服务商和模型。预设包含 OpenAI、xAI、DeepSeek、Cerebras 和 SiliconFlow；自定义服务支持 OpenAI 兼容与 Anthropic 格式。应用支持 ChatGPT/Codex 和 Grok Build 账号登录，可用能力取决于账号权限。Codex 模型选择器读取经过认证的上游目录，并按当前推理路径筛选条目。
 
-AI 润色、屏幕感知和助手联网搜索均提供 **关闭／开启／自动**。只有自动档会使用所选决策模型判断是否需要处理。在 **设置 → 决策模型** 中选择由 TypeSafe（官方）、OpenRouter 或 Vercel 提供的 **JEV**，或 Liquid AI 的 **d1:free**。缺少密钥、超时或判断不确定时沿用原处理流程；决策模型不会生成替换文本，翻译和明确的编辑操作仍会执行。
+AI 润色、屏幕感知和助手联网搜索均提供 **关闭／开启／自动**。只有自动档会使用所选决策模型判断是否需要处理。在 **设置 → 决策模型** 中选择 TypeSafe（官方）、OpenRouter、Vercel、Liquid AI 或自定义决策接口，并配置 API Key、地址和模型名。缺少密钥、超时或判断不确定时沿用原处理流程；决策模型不会生成替换文本，翻译和明确的编辑操作仍会执行。
 
 自动润色以 80% 的无需修改概率为跳过门槛；同时开启自动屏幕感知时，也需要至少 80% 的无需屏幕概率。服务失败会回退到正常润色，并记录在 `app.log` 中。
 
@@ -64,6 +64,8 @@ AI 润色、屏幕感知和助手联网搜索均提供 **关闭／开启／自�
 <summary><strong>从 1.6 之前的版本升级</strong></summary>
 
 原有 Qwen 1.7B 选项会迁移到 R2T2，需要另行下载模型。Qwen 0.6B 和已有模型缓存保留。R2T2 使用独立的[模型许可证](src-tauri/resources/R2T2-MODEL-LICENSE.txt)。
+
+1.7.7 将 Qwen 0.6B 迁移到共享的 audio.cpp 运行时，需要重新下载约 1.15 GB 的 GGUF 模型；已有模型缓存保留。两个本地引擎均支持 CPU 和英伟达 CUDA。
 
 </details>
 
@@ -100,6 +102,6 @@ v1.7.4 Windows 安装包目前未签名。已于 2026 年 10 月 7 日提交 Sig
 
 [构建与排障](docs/development.md) · [发版流程](docs/releasing.md) · [R2T2 后端](docs/r2t2-native.md) · [形式验证](formal/README.md)
 
-基于 Tauri、React 和 Rust 构建，使用 Qwen3-ASR / transcribe.cpp、Confucius4-R2T2 / audio.cpp 和 FireRedVAD。
+基于 Tauri、React 和 Rust 构建，Qwen3-ASR 与 Confucius4-R2T2 共用 audio.cpp，并使用 FireRedVAD。
 
 Light-Whisper 是采用 [GPL-3.0-only](LICENSE) 许可证的开源软件。第三方代码与模型继续适用各自条款，详见 [NOTICE](NOTICE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
