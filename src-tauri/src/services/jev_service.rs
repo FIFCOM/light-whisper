@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use tauri_plugin_keyring::KeyringExt;
 
 pub use crate::state::user_profile::JevProvider;
+use crate::state::user_profile::{JevConfig, JevConnection};
 
 use crate::services::llm_provider::KEYRING_SERVICE;
 
@@ -23,15 +24,17 @@ impl JevProvider {
             Self::OpenRouter => "https://openrouter.ai/api/alpha/decisions",
             Self::Vercel => "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
             Self::Liquid => "https://api.liquid.ai/decisions/v1/systemone",
+            Self::Custom => "",
         }
     }
 
-    fn model(self) -> Option<&'static str> {
+    fn model(self) -> &'static str {
         match self {
-            Self::TypeSafe => Some("jev-1.13.0"),
-            Self::OpenRouter => Some("typesafe/jev-1.13"),
-            Self::Vercel => None,
-            Self::Liquid => Some("d1:free"),
+            Self::TypeSafe => "jev-1.13.0",
+            Self::OpenRouter => "typesafe/jev-1.13",
+            Self::Vercel => "typesafe-ai/jev",
+            Self::Liquid => "d1:free",
+            Self::Custom => "",
         }
     }
 
@@ -41,8 +44,55 @@ impl JevProvider {
             Self::OpenRouter => "/api/alpha/decisions",
             Self::Vercel => "/v4/ai/evaluation-model",
             Self::Liquid => "/decisions/v1/systemone",
+            Self::Custom => "/v1/systemone",
         }
     }
+}
+
+pub fn connection_for(config: &JevConfig, provider: JevProvider) -> JevConnection {
+    let connection = config.connections.get(&provider);
+    JevConnection {
+        base_url: connection
+            .map(|connection| connection.base_url.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| provider.default_endpoint())
+            .to_string(),
+        model: connection
+            .map(|connection| connection.model.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| provider.model())
+            .to_string(),
+    }
+}
+
+pub fn validate_connection(connection: JevConnection) -> Result<JevConnection, String> {
+    let connection = JevConnection {
+        base_url: connection.base_url.trim().to_string(),
+        model: connection.model.trim().to_string(),
+    };
+    if !connection.base_url.is_empty() {
+        let invalid_url = || "Decision model API URL is invalid".to_string();
+        let url = reqwest::Url::parse(&connection.base_url).map_err(|_| invalid_url())?;
+        let authority = connection
+            .base_url
+            .split_once("://")
+            .map(|(_, rest)| rest.split('/').next().unwrap_or_default());
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || authority.is_none_or(|authority| authority.is_empty() || authority.contains('@'))
+            || connection.base_url.chars().any(char::is_control)
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid_url());
+        }
+    }
+    if connection.model.chars().any(char::is_control) {
+        return Err("Decision model name contains invalid characters".to_string());
+    }
+    Ok(connection)
 }
 
 pub fn keyring_user_for_provider(provider: JevProvider) -> &'static str {
@@ -51,6 +101,7 @@ pub fn keyring_user_for_provider(provider: JevProvider) -> &'static str {
         JevProvider::OpenRouter => "jev-openrouter-api-key",
         JevProvider::Vercel => "jev-vercel-api-key",
         JevProvider::Liquid => "decision-liquid-api-key",
+        JevProvider::Custom => "decision-custom-api-key",
     }
 }
 
@@ -98,8 +149,7 @@ pub fn route_questions() -> Value {
     })
 }
 
-fn endpoint_for(provider: JevProvider, endpoint_override: Option<&str>) -> String {
-    let endpoint = endpoint_override.unwrap_or_else(|| provider.default_endpoint());
+fn override_endpoint_for(provider: JevProvider, endpoint: &str) -> String {
     let trimmed = endpoint.trim_end_matches('/');
     let path = provider.path();
     if trimmed
@@ -112,6 +162,24 @@ fn endpoint_for(provider: JevProvider, endpoint_override: Option<&str>) -> Strin
     }
 }
 
+fn endpoint_for(provider: JevProvider, base_url: &str) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(base_url)
+        .map_err(|_| "Decision model API URL is invalid".to_string())?;
+    let path = url.path().trim_end_matches('/');
+    let provider_root = match provider {
+        JevProvider::TypeSafe | JevProvider::Custom => path == "/v1",
+        JevProvider::OpenRouter => matches!(path, "/api" | "/api/v1"),
+        JevProvider::Vercel => path == "/v4/ai",
+        JevProvider::Liquid => matches!(path, "/decisions" | "/decisions/v1"),
+    };
+    if path.is_empty() || provider_root {
+        url.set_path(provider.path());
+        Ok(url.to_string())
+    } else {
+        Ok(base_url.trim_end_matches('/').to_string())
+    }
+}
+
 /// Build a Jev request for an arbitrary immutable state/questions payload.
 ///
 /// Provider-specific model selection, endpoint paths, and headers stay here so
@@ -119,15 +187,29 @@ fn endpoint_for(provider: JevProvider, endpoint_override: Option<&str>) -> Strin
 /// handling or provider metadata.
 pub fn build_evaluation_request(
     client: &reqwest::Client,
-    provider: JevProvider,
+    config: &JevConfig,
     api_key: &str,
     state: Value,
     questions: Value,
     endpoint_override: Option<&str>,
 ) -> Result<reqwest::Request, String> {
+    let provider = config.provider;
+    let mut connection = connection_for(config, provider);
+    if connection.base_url.is_empty() || connection.model.is_empty() {
+        return Err("Decision model connection is incomplete".to_string());
+    }
+    if let Some(endpoint) = endpoint_override {
+        connection.base_url = override_endpoint_for(provider, endpoint);
+    }
+    let connection = validate_connection(connection)?;
+    let endpoint = if endpoint_override.is_some() {
+        connection.base_url
+    } else {
+        endpoint_for(provider, &connection.base_url)?
+    };
     let mut body = serde_json::Map::new();
-    if let Some(model) = provider.model() {
-        body.insert("model".to_string(), json!(model));
+    if provider != JevProvider::Vercel {
+        body.insert("model".to_string(), json!(connection.model));
     }
     body.insert("state".to_string(), state);
     body.insert("questions".to_string(), questions);
@@ -143,7 +225,9 @@ pub fn build_evaluation_request(
     if provider == JevProvider::Vercel {
         headers.insert(
             HeaderName::from_static("ai-model-id"),
-            HeaderValue::from_static("typesafe-ai/jev"),
+            HeaderValue::from_str(&connection.model).map_err(|_| {
+                "Decision model name contains invalid header characters".to_string()
+            })?,
         );
         headers.insert(
             HeaderName::from_static("ai-evaluation-model-specification-version"),
@@ -156,7 +240,7 @@ pub fn build_evaluation_request(
     }
 
     client
-        .post(endpoint_for(provider, endpoint_override))
+        .post(endpoint)
         .headers(headers)
         .json(&Value::Object(body))
         .build()
@@ -169,7 +253,7 @@ pub fn build_evaluation_request(
 /// a prompt string, so untrusted ASR content cannot change the request shape.
 pub fn build_request(
     client: &reqwest::Client,
-    provider: JevProvider,
+    config: &JevConfig,
     api_key: &str,
     text: &str,
     polishing_policy: &str,
@@ -177,7 +261,7 @@ pub fn build_request(
 ) -> Result<reqwest::Request, String> {
     build_evaluation_request(
         client,
-        provider,
+        config,
         api_key,
         json!({
             "text": text,
@@ -242,16 +326,17 @@ pub fn parse_decision(response: &str) -> bool {
 /// parsing problem returns false so the caller continues its normal polish path.
 pub async fn evaluate(
     client: &reqwest::Client,
-    provider: JevProvider,
+    config: &JevConfig,
     api_key: &str,
     text: &str,
     polishing_policy: &str,
     endpoint_override: Option<String>,
 ) -> bool {
+    let provider = config.provider;
     let started = Instant::now();
     let request = match build_request(
         client,
-        provider,
+        config,
         api_key,
         text,
         polishing_policy,

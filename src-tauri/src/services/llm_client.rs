@@ -5,7 +5,7 @@ mod stream;
 mod transport;
 
 pub use request::{build_llm_body, LlmImageInput, LlmRequestOptions, LlmUserInput};
-#[allow(unused_imports)]
+#[cfg(test)]
 pub use stream::{read_anthropic_sse_stream, read_openai_responses_sse_stream, read_sse_stream};
 pub use transport::send_llm_request;
 

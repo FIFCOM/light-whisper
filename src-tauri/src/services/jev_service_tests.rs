@@ -1,6 +1,6 @@
 use super::jev_service::{self, JevProvider};
 use crate::services::ai_polish_service::{evaluate_polish_gate, PolishOutcome, PolishOverrides};
-use crate::state::user_profile::UserProfile;
+use crate::state::user_profile::{JevConfig, JevConnection, UserProfile};
 use crate::state::{user_profile::PolishStructureLevel, AppState};
 use serde_json::{json, Value};
 use std::sync::{
@@ -16,11 +16,11 @@ const ORIGINAL: &str = "原始听写内容，不应被 gate 改写";
 const POLICY_CONTEXT: &str = "按当前润色策略判断原文是否已经满足要求";
 const TEST_API_KEY: &str = "jev-test-key";
 
-struct CapturedRequest {
-    method: String,
-    path: String,
-    headers: String,
-    body: Value,
+pub(super) struct CapturedRequest {
+    pub(super) method: String,
+    pub(super) path: String,
+    pub(super) headers: String,
+    pub(super) body: Value,
 }
 
 fn header_value(headers: &str, name: &str) -> Option<String> {
@@ -90,7 +90,7 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> CapturedRequest {
     }
 }
 
-async fn spawn_json_server(
+pub(super) async fn spawn_json_server(
     status: &str,
     response: &'static [u8],
 ) -> (String, tokio::task::JoinHandle<CapturedRequest>) {
@@ -301,7 +301,7 @@ fn profile_jev_defaults_off_and_contains_no_provider_secrets() {
 fn build_request_matches_typesafe_official_contract() {
     let request = jev_service::build_request(
         &reqwest::Client::new(),
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -321,7 +321,7 @@ fn build_request_matches_typesafe_official_contract() {
 fn build_request_matches_openrouter_alpha_contract() {
     let request = jev_service::build_request(
         &reqwest::Client::new(),
-        JevProvider::OpenRouter,
+        &default_config(JevProvider::OpenRouter),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -341,7 +341,7 @@ fn build_request_matches_openrouter_alpha_contract() {
 fn build_request_matches_vercel_evaluation_model_contract() {
     let request = jev_service::build_request(
         &reqwest::Client::new(),
-        JevProvider::Vercel,
+        &default_config(JevProvider::Vercel),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -390,7 +390,7 @@ fn build_request_matches_liquid_d1_contract() {
     let provider = liquid_provider();
     let request = jev_service::build_request(
         &reqwest::Client::new(),
-        provider,
+        &default_config(provider),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -434,7 +434,7 @@ fn liquid_request_keeps_a_unique_credential_slot_and_provider_path_on_override()
 
     let request = jev_service::build_request(
         &reqwest::Client::new(),
-        provider,
+        &default_config(provider),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -493,7 +493,7 @@ async fn evaluate_calls_the_selected_provider_and_accepts_a_valid_pass() {
 
     let should_skip = jev_service::evaluate(
         &reqwest::Client::new(),
-        JevProvider::OpenRouter,
+        &default_config(JevProvider::OpenRouter),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -533,7 +533,7 @@ async fn evaluate_falls_back_for_http200_malformed_nonpass_and_uncertain_results
         let (endpoint, server) = spawn_json_server("200 OK", response).await;
         let should_skip = jev_service::evaluate(
             &reqwest::Client::new(),
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             ORIGINAL,
             POLICY_CONTEXT,
@@ -557,7 +557,7 @@ async fn evaluate_returns_false_on_provider_http_errors() {
 
     let should_skip = jev_service::evaluate(
         &reqwest::Client::new(),
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -577,7 +577,7 @@ async fn evaluate_returns_false_on_provider_http_errors() {
 fn build_request_instructions_judge_the_original_without_generating_output() {
     let request = jev_service::build_request(
         &reqwest::Client::new(),
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         ORIGINAL,
         POLICY_CONTEXT,
@@ -620,7 +620,7 @@ async fn evaluate_polish_gate_requires_explicit_opt_in_and_preserves_exact_passt
         &state,
         "  原始文本  \n",
         &PolishOverrides::default(),
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint),
     )
@@ -644,7 +644,7 @@ async fn evaluate_polish_gate_requires_explicit_opt_in_and_preserves_exact_passt
         &disabled_state,
         "  原始文本  \n",
         &enabled_gate_overrides(),
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint),
     )
@@ -659,7 +659,7 @@ async fn evaluate_polish_gate_requires_explicit_opt_in_and_preserves_exact_passt
         &state,
         original,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint),
     )
@@ -712,7 +712,7 @@ async fn evaluate_polish_gate_bypasses_required_execution_provider_mismatch_and_
             &state,
             ORIGINAL,
             &overrides,
-            provider,
+            &default_config(provider),
             api_key,
             Some(endpoint),
         )
@@ -749,7 +749,7 @@ async fn evaluate_polish_gate_bypasses_all_effective_translation_modes() {
             &state,
             ORIGINAL,
             &overrides,
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             Some(endpoint),
         )
@@ -781,7 +781,7 @@ async fn evaluate_polish_gate_allows_gate_when_translation_override_disables_glo
         &state,
         original,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint),
     )
@@ -816,7 +816,7 @@ async fn evaluate_polish_gate_includes_custom_strong_policy_and_app_context() {
         &state,
         original,
         &overrides,
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         Some(endpoint),
     )
@@ -876,7 +876,7 @@ async fn evaluate_polish_gate_returns_none_for_low_confidence_and_http_errors() 
             &state,
             ORIGINAL,
             &overrides,
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             Some(endpoint),
         )
@@ -895,7 +895,7 @@ async fn evaluate_stalled_body_times_out_without_retrying() {
         Duration::from_secs(2),
         jev_service::evaluate(
             &reqwest::Client::new(),
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             ORIGINAL,
             POLICY_CONTEXT,
@@ -913,4 +913,424 @@ async fn evaluate_stalled_body_times_out_without_retrying() {
         "timeouts must not retry"
     );
     server.abort();
+}
+
+fn default_config(provider: JevProvider) -> JevConfig {
+    JevConfig {
+        provider,
+        ..JevConfig::default()
+    }
+}
+
+fn configured(provider: JevProvider, base_url: &str, model: &str) -> JevConfig {
+    let mut config = default_config(provider);
+    config.connections.insert(
+        provider,
+        JevConnection {
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+        },
+    );
+    config
+}
+
+#[test]
+fn legacy_jev_connections_keep_all_provider_defaults_and_empty_map_serialization() {
+    let expected = [
+        (
+            JevProvider::TypeSafe,
+            "typesafe",
+            "https://api.typesafe.ai/v1/systemone",
+            "jev-1.13.0",
+        ),
+        (
+            JevProvider::OpenRouter,
+            "openrouter",
+            "https://openrouter.ai/api/alpha/decisions",
+            "typesafe/jev-1.13",
+        ),
+        (
+            JevProvider::Vercel,
+            "vercel",
+            "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
+            "typesafe-ai/jev",
+        ),
+        (
+            JevProvider::Liquid,
+            "liquid",
+            "https://api.liquid.ai/decisions/v1/systemone",
+            "d1:free",
+        ),
+        (JevProvider::Custom, "custom", "", ""),
+    ];
+    for (provider, persisted_name, base_url, model) in expected {
+        let config: JevConfig =
+            serde_json::from_value(json!({"enabled": true, "provider": persisted_name})).unwrap();
+        assert_eq!(config.provider, provider);
+        assert!(config.connections.is_empty());
+        assert!(serde_json::to_value(&config)
+            .unwrap()
+            .get("connections")
+            .is_none());
+        let connection = jev_service::connection_for(&config, provider);
+        assert_eq!(connection.base_url, base_url);
+        assert_eq!(connection.model, model);
+    }
+}
+
+#[test]
+fn jev_connection_fields_default_independently_and_resolve_only_the_requested_provider() {
+    let mut config: JevConfig = serde_json::from_value(json!({
+        "provider": "vercel",
+        "connections": {
+            "typesafe": {"model": "future/typesafe"},
+            "vercel": {"base_url": "https://gateway.example/Case/Evaluate"},
+            "custom": {},
+        }
+    }))
+    .unwrap();
+    let typesafe = jev_service::connection_for(&config, JevProvider::TypeSafe);
+    assert_eq!(typesafe.model, "future/typesafe");
+    assert_eq!(typesafe.base_url, "https://api.typesafe.ai/v1/systemone");
+    let vercel = jev_service::connection_for(&config, JevProvider::Vercel);
+    assert_eq!(vercel.base_url, "https://gateway.example/Case/Evaluate");
+    assert_eq!(vercel.model, "typesafe-ai/jev");
+    config.connections.insert(
+        JevProvider::TypeSafe,
+        JevConnection {
+            base_url: String::new(),
+            model: String::new(),
+        },
+    );
+    let reset = jev_service::connection_for(&config, JevProvider::TypeSafe);
+    assert_eq!(reset.model, "jev-1.13.0");
+    let custom = jev_service::connection_for(&config, JevProvider::Custom);
+    assert!(custom.base_url.is_empty() && custom.model.is_empty());
+}
+
+#[test]
+fn jev_connection_validation_trims_fields_and_allows_drafts_and_arbitrary_model_names() {
+    for (base_url, model, expected_url, expected_model) in [
+        (
+            "  http://127.0.0.1:8123/v1  ",
+            "  vendor/future:free  ",
+            "http://127.0.0.1:8123/v1",
+            "vendor/future:free",
+        ),
+        (
+            "https://decision.example/Case/Eval/",
+            "next-preview",
+            "https://decision.example/Case/Eval/",
+            "next-preview",
+        ),
+        ("  ", "local/model", "", "local/model"),
+        (
+            "https://decision.example/v1",
+            "  ",
+            "https://decision.example/v1",
+            "",
+        ),
+        ("", "", "", ""),
+    ] {
+        let connection = jev_service::validate_connection(JevConnection {
+            base_url: base_url.into(),
+            model: model.into(),
+        })
+        .expect("valid decision draft should be accepted");
+        assert_eq!(connection.base_url, expected_url);
+        assert_eq!(connection.model, expected_model);
+    }
+}
+
+#[test]
+fn jev_connection_validation_rejects_unsafe_urls_and_model_controls_without_echoing_values() {
+    for base_url in [
+        "secret-invalid-url",
+        "/relative-secret",
+        "ftp://secret.example/v1",
+        "https:///",
+        "https://user-secret:password-secret@decision.example/v1",
+        "https://user-secret@decision.example/v1",
+        "https://decision.example/v1?secret-query=value",
+        "https://decision.example/v1#secret-fragment",
+        "https://decision.example:invalid-secret/v1",
+    ] {
+        let error = jev_service::validate_connection(JevConnection {
+            base_url: base_url.into(),
+            model: "valid-model".into(),
+        })
+        .expect_err("unsafe URL must fail validation");
+        assert!(
+            !error.contains("secret"),
+            "validation must not echo supplied URL data"
+        );
+        assert!(!error.contains(base_url));
+    }
+    for model in [
+        "secret\r\ninjected: yes",
+        "secret\0model",
+        "secret\tmodel",
+        "secret\u{7f}model",
+    ] {
+        let error = jev_service::validate_connection(JevConnection {
+            base_url: "https://decision.example/v1".into(),
+            model: model.into(),
+        })
+        .expect_err("model controls must fail validation");
+        assert!(!error.contains("secret"));
+        assert!(!error.contains(model));
+    }
+}
+
+#[test]
+fn configured_jev_endpoints_normalize_provider_roots_without_rewriting_arbitrary_paths() {
+    let cases = [
+        (JevProvider::TypeSafe, "", "/v1/systemone"),
+        (JevProvider::TypeSafe, "/v1/", "/v1/systemone"),
+        (JevProvider::OpenRouter, "", "/api/alpha/decisions"),
+        (JevProvider::OpenRouter, "/api", "/api/alpha/decisions"),
+        (JevProvider::OpenRouter, "/api/v1/", "/api/alpha/decisions"),
+        (JevProvider::Liquid, "", "/decisions/v1/systemone"),
+        (JevProvider::Liquid, "/decisions", "/decisions/v1/systemone"),
+        (
+            JevProvider::Liquid,
+            "/decisions/v1/",
+            "/decisions/v1/systemone",
+        ),
+        (JevProvider::Vercel, "", "/v4/ai/evaluation-model"),
+        (JevProvider::Vercel, "/v4/ai/", "/v4/ai/evaluation-model"),
+        (JevProvider::Custom, "", "/v1/systemone"),
+        (JevProvider::Custom, "/v1/", "/v1/systemone"),
+    ];
+    for (provider, suffix, expected_path) in cases {
+        let config = configured(
+            provider,
+            &format!("http://127.0.0.1:8123{suffix}"),
+            "arbitrary/model",
+        );
+        let request = jev_service::build_request(
+            &reqwest::Client::new(),
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            None,
+        )
+        .unwrap();
+        assert_eq!(request.url().host_str(), Some("127.0.0.1"));
+        assert_eq!(request.url().path(), expected_path, "{provider:?} {suffix}");
+    }
+    for provider in [
+        JevProvider::TypeSafe,
+        JevProvider::OpenRouter,
+        JevProvider::Vercel,
+        JevProvider::Liquid,
+        JevProvider::Custom,
+    ] {
+        let config = configured(
+            provider,
+            "http://127.0.0.1:8123/Decision/Custom/",
+            "future-model",
+        );
+        let request = jev_service::build_request(
+            &reqwest::Client::new(),
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            None,
+        )
+        .unwrap();
+        assert_eq!(request.url().path(), "/Decision/Custom", "{provider:?}");
+    }
+}
+
+#[test]
+fn configured_jev_models_keep_the_typed_protocol_and_vercel_version_headers() {
+    for provider in [
+        JevProvider::TypeSafe,
+        JevProvider::OpenRouter,
+        JevProvider::Vercel,
+        JevProvider::Liquid,
+        JevProvider::Custom,
+    ] {
+        let config = configured(
+            provider,
+            "http://127.0.0.1:8123/Decision/Evaluate",
+            "organization/future-decision:preview",
+        );
+        let request = jev_service::build_request(
+            &reqwest::Client::new(),
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            None,
+        )
+        .unwrap();
+        assert_common_request_contract(&request);
+        assert!(request.headers()[reqwest::header::AUTHORIZATION].is_sensitive());
+        let body = request_body(&request);
+        assert!(
+            body.get("messages").is_none(),
+            "decision protocol must remain structured"
+        );
+        if provider == JevProvider::Vercel {
+            assert!(body.get("model").is_none());
+            assert_eq!(
+                request.headers()["ai-model-id"],
+                "organization/future-decision:preview"
+            );
+            assert_eq!(
+                request.headers()["ai-evaluation-model-specification-version"],
+                "4"
+            );
+            assert_eq!(request.headers()["ai-gateway-protocol-version"], "0.0.1");
+        } else {
+            assert_eq!(body["model"], "organization/future-decision:preview");
+            assert!(request.headers().get("ai-model-id").is_none());
+        }
+    }
+}
+
+#[test]
+fn jev_endpoint_override_wins_over_stored_url_without_discarding_the_stored_model() {
+    let config = configured(
+        JevProvider::OpenRouter,
+        "https://never-contact.invalid/Decision",
+        "future-router-model",
+    );
+    let request = jev_service::build_request(
+        &reqwest::Client::new(),
+        &config,
+        TEST_API_KEY,
+        ORIGINAL,
+        POLICY_CONTEXT,
+        Some("http://127.0.0.1:8123"),
+    )
+    .unwrap();
+    assert_eq!(
+        request.url().as_str(),
+        "http://127.0.0.1:8123/api/alpha/decisions"
+    );
+    assert_eq!(request_body(&request)["model"], "future-router-model");
+}
+
+#[test]
+fn incomplete_custom_connections_and_invalid_authorization_or_model_headers_cannot_build() {
+    for (base_url, model) in [("", ""), ("", "model"), ("http://127.0.0.1:8123/v1", "")] {
+        let config = configured(JevProvider::Custom, base_url, model);
+        assert!(jev_service::build_request(
+            &reqwest::Client::new(),
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            None
+        )
+        .is_err());
+    }
+    let config = configured(
+        JevProvider::Vercel,
+        "http://127.0.0.1:8123/v4/ai",
+        "secret\r\ninjected: yes",
+    );
+    let error = jev_service::build_request(
+        &reqwest::Client::new(),
+        &config,
+        TEST_API_KEY,
+        ORIGINAL,
+        POLICY_CONTEXT,
+        None,
+    )
+    .unwrap_err();
+    assert!(!error.contains("secret"));
+    let error = jev_service::build_request(
+        &reqwest::Client::new(),
+        &default_config(JevProvider::TypeSafe),
+        "secret\r\ninjected: yes",
+        ORIGINAL,
+        POLICY_CONTEXT,
+        None,
+    )
+    .unwrap_err();
+    assert!(!error.contains("secret"));
+}
+
+#[test]
+fn every_jev_provider_keeps_a_unique_stable_keyring_slot_and_profiles_never_store_keys() {
+    let slots = [
+        (JevProvider::TypeSafe, "jev-typesafe-api-key"),
+        (JevProvider::OpenRouter, "jev-openrouter-api-key"),
+        (JevProvider::Vercel, "jev-vercel-api-key"),
+        (JevProvider::Liquid, "decision-liquid-api-key"),
+        (JevProvider::Custom, "decision-custom-api-key"),
+    ];
+    let mut profile = UserProfile::default();
+    let mut seen = std::collections::HashSet::new();
+    for (provider, slot) in slots {
+        assert_eq!(jev_service::keyring_user_for_provider(provider), slot);
+        assert!(seen.insert(slot));
+        profile.jev.connections.insert(
+            provider,
+            JevConnection {
+                base_url: "http://127.0.0.1:8123/v1".into(),
+                model: "future-model".into(),
+            },
+        );
+    }
+    let encoded = serde_json::to_value(&profile).unwrap();
+    let connections = encoded["jev"]["connections"].as_object().unwrap();
+    assert_eq!(connections.len(), 5);
+    for connection in connections.values() {
+        let fields = connection.as_object().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains_key("base_url") && fields.contains_key("model"));
+    }
+    assert!(!serde_json::to_string(&profile)
+        .unwrap()
+        .contains(TEST_API_KEY));
+}
+
+#[tokio::test]
+async fn configured_custom_gate_sends_a_real_loopback_request_without_endpoint_override() {
+    let response = br#"{"answers":{"route":{"type":"choice","choice":"pass","probabilities":{"pass":0.95,"polish":0.04,"uncertain":0.01}}}}"#;
+    let (endpoint, server) = spawn_json_server("200 OK", response).await;
+    let config = configured(
+        JevProvider::Custom,
+        &format!("{endpoint}/Typed/Decision"),
+        "local-decider",
+    );
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let request = jev_service::build_request(
+        &client,
+        &config,
+        TEST_API_KEY,
+        ORIGINAL,
+        POLICY_CONTEXT,
+        None,
+    )
+    .unwrap();
+    assert_eq!(request.url().as_str(), format!("{endpoint}/Typed/Decision"));
+    assert!(
+        jev_service::evaluate(
+            &client,
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            None
+        )
+        .await
+    );
+    let captured = timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(captured.path, "/Typed/Decision");
+    assert_eq!(captured.body["model"], "local-decider");
+    assert_eq!(captured.body["state"]["text"], ORIGINAL);
 }

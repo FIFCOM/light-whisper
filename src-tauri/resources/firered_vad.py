@@ -72,6 +72,7 @@ class FireRedVad:
         fbank_options.mel_opts.debug_mel = False
         self._knf = knf
         self._fbank_options = fbank_options
+        self._feature_cache = None
 
         session_options = ort.SessionOptions()
         session_options.inter_op_num_threads = 1
@@ -85,23 +86,46 @@ class FireRedVad:
         )
 
     def _extract_features(self, audio: np.ndarray) -> np.ndarray:
+        cache = self._feature_cache
+        # Drop partially advanced fbank state if any extraction step raises.
+        self._feature_cache = None
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
         pcm = np.clip(samples * 32768.0, -32768.0, 32767.0)
+        cacheable = pcm.size <= 12 * SAMPLE_RATE
 
-        fbank = self._knf.OnlineFbank(self._fbank_options)
-        fbank.accept_waveform(SAMPLE_RATE, pcm.tolist())
+        if (
+            cacheable
+            and cache is not None
+            and pcm.size >= cache[0].size
+            and np.array_equal(pcm[: cache[0].size], cache[0])
+        ):
+            previous_pcm, fbank, features = cache
+            offset = previous_pcm.size
+        else:
+            fbank = self._knf.OnlineFbank(self._fbank_options)
+            features = np.empty((0, 80), dtype=np.float32)
+            offset = 0
+
+        if pcm.size > offset:
+            fbank.accept_waveform(SAMPLE_RATE, pcm[offset:].tolist())
         frame_count = fbank.num_frames_ready
-        if frame_count == 0:
-            return np.empty((0, 80), dtype=np.float32)
+        if frame_count > features.shape[0]:
+            new_features = np.asarray(
+                [fbank.get_frame(index) for index in range(features.shape[0], frame_count)],
+                dtype=np.float32,
+            )
+            new_features = np.ascontiguousarray(
+                (new_features - self._mean) * self._inverse_std,
+                dtype=np.float32,
+            )
+            features = (
+                np.concatenate((features, new_features)) if features.size else new_features
+            )
 
-        features = np.asarray(
-            [fbank.get_frame(index) for index in range(frame_count)],
-            dtype=np.float32,
-        )
-        return np.ascontiguousarray(
-            (features - self._mean) * self._inverse_std,
-            dtype=np.float32,
-        )
+        result = features.copy() if cacheable else features
+        if cacheable:
+            self._feature_cache = (pcm, fbank, features)
+        return result
 
     def probabilities(self, audio: np.ndarray) -> np.ndarray:
         features = self._extract_features(audio)

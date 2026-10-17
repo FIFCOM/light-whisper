@@ -4,7 +4,7 @@ Build on Windows 10/11 x64:
 
 | Tool | Version | Purpose |
 |:--|:--|:--|
-| [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) | 2022 (MSVC 14.44 validated) | Rust and native R2T2 C++ toolchain |
+| [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) | 2022 (MSVC 14.44 validated) | Rust and shared ASR C++ toolchain |
 | [Rust](https://www.rust-lang.org/tools/install) | 1.93.0 (CI) | Tauri backend |
 | [Node.js](https://nodejs.org/) | 22.14.0 (CI) | Frontend build |
 | [pnpm](https://pnpm.io/) | 10.28.2 (CI) | Frontend packages |
@@ -21,8 +21,9 @@ uv sync --frozen
 pnpm tauri dev
 ```
 
-For R2T2 development, first build its native CPU and/or CUDA runtime with the
-commands below. The development server loads DLLs beside its source script;
+For Qwen 0.6B and R2T2 development, first build the shared native runtimes with the
+commands below. Qwen and R2T2 support CPU and NVIDIA CUDA.
+The development server loads DLLs beside its source script;
 the installed application uses the self-contained engine archive.
 
 Build a distributable installer. The bundled Python engine archive is intentionally
@@ -36,11 +37,24 @@ pnpm tauri build
 ```
 
 The NSIS installer is written to `src-tauri/target/release/bundle/nsis/`.
+7-Zip uses a solid XZ archive, a 256 MiB dictionary and x86 BCJ filtering.
+Files are ordered by size so large native libraries can share dictionary history.
+The NSIS wrapper uses zlib around the precompressed engine.
+The ONNX Runtime hook omits its standalone C API DLL while retaining the Python
+binding and provider libraries. Normal dependency analysis still includes the C
+API DLL if a collected binary imports it. Packaging also removes the nested Kaldi
+core DLL only when its bytes match the copy at the bundle root.
+The copied distribution excludes the retired transcribe.cpp packages and Vulkan
+backend DLLs. Qwen 0.6B and R2T2 use only the shared audio.cpp runtime. CUDA/CRT
+dependencies stay beside their native library unless an identical copy exists
+at the bundle root; source native packages and their licenses stay intact.
 `pnpm tauri build` rejects a missing, empty, or non-XZ engine archive instead of
 producing an installer without local ASR. Reuse a verified archive only if its
 Python code, native libraries and dependencies are unchanged. Distribution builds
-compare the bundled Python sources with the checkout and reject stale archives;
-rebuild the engine when this check fails.
+compare the bundled Python sources and shared native build manifests with the
+checkout, verify the native DLL sizes and hashes, and reject stale archives or
+retired transcribe.cpp/Vulkan payloads;
+rebuild the native packages and engine when this check fails.
 
 Optional local-model prefetch:
 

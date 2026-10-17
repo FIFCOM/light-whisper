@@ -832,7 +832,7 @@ pub async fn run_correction_validation(
             .unwrap_or_default();
         if let Some(invalid) = crate::services::jev_review::review_corrections(
             &state.http_client,
-            jev.provider,
+            &jev,
             &key,
             &ai_corrections,
             None,

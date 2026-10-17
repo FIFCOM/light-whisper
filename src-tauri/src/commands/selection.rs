@@ -491,11 +491,12 @@ async fn run_llm_action(
     };
 
     let screen_choice = if selection.auto_screenshot && selection.screenshot_routing {
-        let provider = state.with_profile(|profile| profile.jev.provider);
-        let key = jev_service::load_api_key_for_provider(app_handle, provider).unwrap_or_default();
+        let jev_config = state.with_profile(|profile| profile.jev.clone());
+        let key = jev_service::load_api_key_for_provider(app_handle, jev_config.provider)
+            .unwrap_or_default();
         let decision = jev_tasks::evaluate(
             &state.http_client,
-            provider,
+            &jev_config,
             &key,
             serde_json::json!({
                 "request": instruction,

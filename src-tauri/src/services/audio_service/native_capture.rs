@@ -18,6 +18,10 @@ pub(crate) enum NativeCaptureControl {
 }
 
 pub(super) trait NativeCaptureSink: Send {
+    fn chunk_samples(&self) -> usize {
+        NATIVE_CHUNK_SAMPLES
+    }
+
     fn feed(
         &mut self,
         samples: &[i16],
@@ -73,7 +77,7 @@ pub(super) async fn run_capture<S: NativeCaptureSink>(
         Err(error) => {
             let _ = sink.cancel().await;
             return Err(AppError::Asr(format!(
-                "R2T2 capture resampler initialization failed: {error}"
+                "Native ASR capture resampler initialization failed: {error}"
             )));
         }
     };
@@ -131,7 +135,7 @@ pub(super) async fn run_capture<S: NativeCaptureSink>(
                 let mut output = Vec::new();
                 if let Err(error) = resampler.process_chunk(&raw, &mut output) {
                     let _ = sink.cancel().await;
-                    return Err(AppError::Asr(format!("R2T2 capture resampling failed: {error}")));
+                    return Err(AppError::Asr(format!("Native ASR capture resampling failed: {error}")));
                 }
 
                 pending.append(&mut output);
@@ -178,7 +182,7 @@ fn copy_new_samples(
     let captured = samples.lock();
     if captured.len() < *raw_offset {
         return Err(AppError::Asr(
-            "R2T2 capture sample buffer regressed".to_string(),
+            "Native ASR capture sample buffer regressed".to_string(),
         ));
     }
     let new_samples = captured[*raw_offset..].to_vec();
@@ -192,20 +196,19 @@ async fn feed_ready<S: NativeCaptureSink, F: Fn(NativeStreamUpdate) + Send>(
     control: &mut oneshot::Receiver<NativeCaptureControl>,
     on_update: &mut F,
 ) -> Result<Option<NativeCaptureControl>, AppError> {
+    let chunk_samples = sink.chunk_samples().max(1);
     loop {
         if let Some(action) = poll_control(control) {
             pending.compact();
             return Ok(Some(action));
         }
-        if pending.remaining().len() < NATIVE_CHUNK_SAMPLES {
+        if pending.remaining().len() < chunk_samples {
             pending.compact();
             return Ok(None);
         }
 
-        let update = sink
-            .feed(&pending.remaining()[..NATIVE_CHUNK_SAMPLES])
-            .await?;
-        pending.consume(NATIVE_CHUNK_SAMPLES);
+        let update = sink.feed(&pending.remaining()[..chunk_samples]).await?;
+        pending.consume(chunk_samples);
         on_update(update);
     }
 }
@@ -215,11 +218,10 @@ async fn feed_full<S: NativeCaptureSink, F: Fn(NativeStreamUpdate) + Send>(
     pending: &mut PendingOutput,
     on_update: &mut F,
 ) -> Result<(), AppError> {
-    while pending.remaining().len() >= NATIVE_CHUNK_SAMPLES {
-        let update = sink
-            .feed(&pending.remaining()[..NATIVE_CHUNK_SAMPLES])
-            .await?;
-        pending.consume(NATIVE_CHUNK_SAMPLES);
+    let chunk_samples = sink.chunk_samples().max(1);
+    while pending.remaining().len() >= chunk_samples {
+        let update = sink.feed(&pending.remaining()[..chunk_samples]).await?;
+        pending.consume(chunk_samples);
         on_update(update);
     }
     pending.compact();
@@ -231,8 +233,9 @@ async fn feed_all<S: NativeCaptureSink, F: Fn(NativeStreamUpdate) + Send>(
     pending: &mut PendingOutput,
     on_update: &mut F,
 ) -> Result<(), AppError> {
+    let chunk_samples = sink.chunk_samples().max(1);
     while !pending.remaining().is_empty() {
-        let count = pending.remaining().len().min(NATIVE_CHUNK_SAMPLES);
+        let count = pending.remaining().len().min(chunk_samples);
         let update = sink.feed(&pending.remaining()[..count]).await?;
         pending.consume(count);
         on_update(update);
@@ -265,14 +268,14 @@ async fn finish_capture<S: NativeCaptureSink, F: Fn(NativeStreamUpdate) + Send>(
     if let Err(error) = resampler.process_chunk(&raw, &mut output) {
         let _ = sink.cancel().await;
         return Err(AppError::Asr(format!(
-            "R2T2 capture resampling failed: {error}"
+            "Native ASR capture resampling failed: {error}"
         )));
     }
     pending.append(&mut output);
     if let Err(error) = resampler.finish(&mut output) {
         let _ = sink.cancel().await;
         return Err(AppError::Asr(format!(
-            "R2T2 capture resampler flush failed: {error}"
+            "Native ASR capture resampler flush failed: {error}"
         )));
     }
     pending.append(&mut output);

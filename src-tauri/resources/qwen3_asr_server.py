@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Low-latency local Qwen3-ASR GGUF server backed by transcribe.cpp."""
+"""Resident Qwen3-ASR GGUF server with a shared audio.cpp streaming path."""
 
-import importlib.metadata
 import os
+from pathlib import Path
 import subprocess
 import time
 import traceback
+from types import SimpleNamespace
 
+from asr_stream_server import ASRStreamServerMixin
 from firered_vad import FireRedVad
+from qwen3_native import QwenNativeRuntime, QwenPreviewRuntime
+from r2t2_stream import R2T2StreamSession
 
 from server_common import (
     BaseASRServer,
@@ -26,16 +30,17 @@ logger = setup_rotating_logger(__name__, "qwen3_asr_server.log", "Qwen3-ASR服�
 
 from hf_cache_utils import QWEN3_ASR_MODELS, find_hf_snapshot_file
 
-QWEN3_ASR_N_CTX = 32_768
 QWEN3_VAD_SAMPLE_RATE = 16_000
 
 
-class Qwen3ASRServer(BaseASRServer):
+class Qwen3ASRServer(ASRStreamServerMixin, BaseASRServer):
     """Keep one GGUF model and one KV session resident across requests.
 
     Idle unload, when the user turns it on, closes both and the next
     transcribe calls initialize() again. FireRedVAD stays loaded.
     """
+
+    _stream_display_name = "Qwen3-ASR"
 
     def __init__(self, engine=None):
         engine = engine or os.environ.get("LIGHT_WHISPER_ASR_ENGINE", "qwen3-asr-0.6b")
@@ -45,8 +50,10 @@ class Qwen3ASRServer(BaseASRServer):
         super().__init__(engine=engine, logger=logger)
         self.model = None
         self.session = None
+        self.stream = None
         self.vad_model = None
-        self.backend = "cuda" if self.device == "cuda" else "auto"
+        self.backend = "cuda" if self.device == "cuda" else "cpu"
+        self._gpu_device_info_cache = None
         self._last_load_error = None
         self._total_inference_ms = 0.0
         self._total_vad_ms = 0.0
@@ -58,13 +65,15 @@ class Qwen3ASRServer(BaseASRServer):
         if _has_nvidia_gpu():
             logger.info("检测到 NVIDIA CUDA 驱动，Qwen3-ASR 优先使用 CUDA")
             return "cuda"
-        logger.info("未检测到 NVIDIA CUDA 驱动，Qwen3-ASR 自动选择 Vulkan/CPU")
+        logger.info("未检测到 NVIDIA CUDA 驱动，Qwen3-ASR 使用 CPU")
         return "cpu"
 
     def _get_gpu_device_info(self):
         info = {"device": self.device}
         if self.backend != "cuda":
             return info
+        if self._gpu_device_info_cache is not None:
+            return dict(self._gpu_device_info_cache)
         try:
             query = subprocess.run(
                 [
@@ -83,10 +92,11 @@ class Qwen3ASRServer(BaseASRServer):
             info["gpu_memory_total"] = round(float(memory_mb) / 1024, 1)
         except (OSError, subprocess.TimeoutExpired, IndexError, ValueError):
             pass
+        self._gpu_device_info_cache = dict(info)
         return info
 
     def _cleanup_memory(self):
-        # transcribe.cpp owns its CUDA allocations; torch.empty_cache() cannot
+        # Native runtimes own their CUDA allocations; torch.empty_cache() cannot
         # release them and importing torch here would add substantial overhead.
         import gc
 
@@ -104,7 +114,7 @@ class Qwen3ASRServer(BaseASRServer):
 
     def _suspend_gpu_runtime(self):
         """Unload the GGUF model and KV session. FireRedVAD stays on CPU."""
-        if not self.initialized:
+        if not self.initialized or self._stream_is_active():
             return False
         vad = self.vad_model
         self._close_runtime()
@@ -115,33 +125,36 @@ class Qwen3ASRServer(BaseASRServer):
 
     def _close_runtime(self):
         self.initialized = False
-        if self.session is not None:
+        stream, self.stream = self.stream, None
+        if stream is not None:
             try:
-                self.session.close()
+                stream.close()
             except Exception:
                 pass
-            self.session = None
-        if self.model is not None:
+        session, self.session = self.session, None
+        model, self.model = self.model, None
+        for runtime in (session, model if model is not session else None):
+            if runtime is None:
+                continue
             try:
-                self.model.close()
+                runtime.close()
             except Exception:
                 pass
-            self.model = None
 
     def _load_runtime(self, model_path):
-        import transcribe_cpp
-
-        preferred = ["cuda", "vulkan", "cpu"] if self.device == "cuda" else ["auto", "cpu"]
+        self._gpu_device_info_cache = None
+        runtime_root = Path(__file__).resolve().with_name("r2t2-native")
+        preferred = ["cuda", "cpu"] if self.device == "cuda" else ["cpu"]
         errors = []
         for backend in preferred:
             try:
                 with self.stdout_suppressor.suppress():
-                    model = transcribe_cpp.Model(model_path, backend=backend)
-                    session = model.session(kv_type="f16", n_ctx=QWEN3_ASR_N_CTX)
-                self.model = model
-                self.session = session
-                self.backend = backend
-                self.device = "cuda" if backend == "cuda" else backend
+                    runtime = QwenNativeRuntime(
+                        model_path, runtime_root / backend / "audiocpp.dll",
+                        backend=backend, dll_directories=(runtime_root.parent,),
+                    )
+                self.model = self.session = runtime
+                self.backend = self.device = backend
                 return
             except Exception as exc:
                 errors.append(f"{backend}: {exc}")
@@ -189,6 +202,18 @@ class Qwen3ASRServer(BaseASRServer):
         # phrase timing; only idle time before/after the utterance is removed.
         return np.ascontiguousarray(audio[start:end]), len(chunks), vad_ms
 
+    def _run_inference(self, audio, *, context="", language=None):
+        with self.stdout_suppressor.suppress():
+            return self.session.run(audio, timestamps="none", context=context, language=language)
+
+    def _transcribe_stream_audio(self, audio, *, context="", language=None):
+        # Stream callbacks bypass the offline busy guard. VAD runs once for
+        # each preview/final, preserving pauses and skipping silence entirely.
+        audio, segments, _ = self._filter_speech(audio)
+        if not segments:
+            return SimpleNamespace(text="", language=language)
+        return self._run_inference(audio, context=context, language=language)
+
     def initialize(self):
         if self.initialized:
             return {"success": True, "message": "模型已初始化", "engine": self.engine}
@@ -209,6 +234,9 @@ class Qwen3ASRServer(BaseASRServer):
             if self.vad_model is None:
                 self.vad_model = FireRedVad()
             self._warmup_inference()
+            self.stream = R2T2StreamSession(
+                QwenPreviewRuntime(self._transcribe_stream_audio)
+            )
             self.initialized = True
             self._gpu_suspended = False
             self._last_load_error = None
@@ -220,6 +248,7 @@ class Qwen3ASRServer(BaseASRServer):
                 "model_loaded": True,
                 "engine": self.engine,
                 "backend": self.backend,
+                "native_streaming": self.stream is not None,
                 **self._get_gpu_device_info(),
             }
         except ImportError as exc:
@@ -299,9 +328,17 @@ class Qwen3ASRServer(BaseASRServer):
             init_result = self.initialize()
             if not init_result["success"]:
                 return init_result
+        if self._stream_is_active():
+            return self._stream_busy_response()
 
         input_mode = "memory" if audio_base64 else "path"
         try:
+            options = options if isinstance(options, dict) else {}
+            context = self._compose_context(
+                options.get("context", ""),
+                hot_words if hot_words is not None else options.get("hot_words", []),
+            )
+            language = self._normalize_language(options.get("language"))
             audio, duration, input_mode = self._load_audio(
                 audio_path, audio_base64, audio_format, sample_rate
             )
@@ -335,10 +372,7 @@ class Qwen3ASRServer(BaseASRServer):
                 }
 
             started = time.perf_counter()
-            with self.stdout_suppressor.suppress():
-                # Qwen3-ASR does not advertise speculative decoding. Keeping a
-                # persistent KV session is the supported low-latency path.
-                result = self.session.run(audio, timestamps="none")
+            result = self._run_inference(audio, context=context, language=language)
             inference_ms = (time.perf_counter() - started) * 1000
             self._total_inference_ms += inference_ms
             self.transcription_count += 1
@@ -385,6 +419,7 @@ class Qwen3ASRServer(BaseASRServer):
             "initialized": self.initialized,
             "engine": self.engine,
             "backend": self.backend,
+            "native_streaming": self.initialized and self.stream is not None,
             "speculative_decoding": False,
             "models_loaded": {
                 "asr": self.model is not None,
@@ -394,32 +429,27 @@ class Qwen3ASRServer(BaseASRServer):
         }
 
     def check_status(self):
-        try:
-            version = importlib.metadata.version("transcribe-cpp")
-            model_loaded = self.model is not None and self.session is not None
-            return self._with_gpu_suspend_flag({
-                "success": True,
-                "installed": True,
-                "initialized": self.initialized,
-                "version": version,
-                "engine": self.engine,
-                "backend": self.backend,
-                "model_loaded": model_loaded,
-                "models": {
-                    "asr": model_loaded,
-                    "vad": self.vad_model is not None,
-                    "punc": True,
-                },
-                **self._get_gpu_device_info(),
-            })
-        except importlib.metadata.PackageNotFoundError as exc:
-            return {
-                "success": False,
-                "installed": False,
-                "initialized": False,
-                "error": f"Qwen3-ASR 依赖加载失败: {exc}",
-                "engine": self.engine,
-            }
+        model_loaded = self.model is not None and self.session is not None
+        runtime_root = Path(__file__).resolve().with_name("r2t2-native")
+        installed = model_loaded or any(
+            (runtime_root / backend / "audiocpp.dll").is_file()
+            for backend in ("cuda", "cpu")
+        )
+        return self._with_gpu_suspend_flag({
+            "success": True,
+            "installed": installed,
+            "initialized": self.initialized,
+            "engine": self.engine,
+            "backend": self.backend,
+            "model_loaded": model_loaded,
+            "native_streaming": self.initialized and model_loaded and self.stream is not None,
+            "models": {
+                "asr": model_loaded,
+                "vad": self.vad_model is not None,
+                "punc": True,
+            },
+            **self._get_gpu_device_info(),
+        })
 
 
 if __name__ == "__main__":

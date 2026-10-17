@@ -1,6 +1,6 @@
 use super::jev_service::JevProvider;
 use super::jev_tasks;
-use crate::state::user_profile::{JevConfig, UserProfile};
+use crate::state::user_profile::{JevConfig, JevConnection, UserProfile};
 use serde_json::{json, Map, Value};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -628,7 +628,7 @@ async fn evaluate_uses_selected_provider_transport_and_returns_json_payload() {
         let questions = jev_tasks::screen_questions();
         let result = jev_tasks::evaluate(
             &reqwest::Client::new(),
-            provider,
+            &default_config(provider),
             TEST_API_KEY,
             state.clone(),
             questions.clone(),
@@ -682,7 +682,7 @@ async fn evaluate_fails_closed_for_malformed_json_and_http_errors() {
         let (endpoint, server) = spawn_json_server(status, response).await;
         let result = jev_tasks::evaluate(
             &reqwest::Client::new(),
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             json!({"text": TEST_STATE}),
             jev_tasks::screen_questions(),
@@ -706,7 +706,7 @@ async fn evaluate_skips_network_for_empty_key_or_questions() {
         spawn_counting_server("200 OK", br#"{}"#).await;
     let result = jev_tasks::evaluate(
         &reqwest::Client::new(),
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         "",
         json!({"text": TEST_STATE}),
         jev_tasks::screen_questions(),
@@ -721,7 +721,7 @@ async fn evaluate_skips_network_for_empty_key_or_questions() {
         spawn_counting_server("200 OK", br#"{}"#).await;
     let result = jev_tasks::evaluate(
         &reqwest::Client::new(),
-        JevProvider::TypeSafe,
+        &default_config(JevProvider::TypeSafe),
         TEST_API_KEY,
         json!({"text": TEST_STATE}),
         json!({}),
@@ -741,7 +741,7 @@ async fn evaluate_bounds_the_entire_stalled_body_without_retrying() {
         Duration::from_secs(1),
         jev_tasks::evaluate(
             &reqwest::Client::new(),
-            JevProvider::TypeSafe,
+            &default_config(JevProvider::TypeSafe),
             TEST_API_KEY,
             json!({"text": TEST_STATE}),
             jev_tasks::screen_questions(),
@@ -792,4 +792,135 @@ fn screen_topic_words_do_not_override_auto_decisions() {
             Some("unneeded")
         ));
     }
+}
+
+fn default_config(provider: JevProvider) -> JevConfig {
+    JevConfig {
+        provider,
+        ..JevConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn configured_jev_tasks_send_custom_models_for_screen_search_audit_and_correction_questions()
+{
+    let response = br#"{"answers":{"screen":{"type":"choice","choice":"needed","probabilities":{"needed":0.95,"unneeded":0.04,"uncertain":0.01}}}}"#;
+    for (provider, questions) in [
+        (JevProvider::TypeSafe, jev_tasks::screen_questions()),
+        (JevProvider::OpenRouter, jev_tasks::search_questions()),
+        (JevProvider::Vercel, jev_tasks::audit_questions()),
+        (JevProvider::Liquid, jev_tasks::correction_questions(1)),
+        (
+            JevProvider::Custom,
+            jev_tasks::routing_questions(true, true),
+        ),
+    ] {
+        let (endpoint, server) = spawn_json_server("200 OK", response).await;
+        let mut config = default_config(provider);
+        config.connections.insert(
+            provider,
+            JevConnection {
+                base_url: "https://never-contact.invalid/Decision".into(),
+                model: "future/task-model".into(),
+            },
+        );
+        let client = crate::state::AppState::new().http_client.clone();
+        let result = jev_tasks::evaluate(
+            &client,
+            &config,
+            TEST_API_KEY,
+            json!({"text": TEST_STATE}),
+            questions.clone(),
+            Duration::from_secs(1),
+            Some(&endpoint),
+        )
+        .await;
+        let captured = timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_some());
+        assert_eq!(captured.body["questions"], questions);
+        assert_eq!(
+            header_value(&captured.headers, "authorization").as_deref(),
+            Some("Bearer jev-test-key")
+        );
+        if provider == JevProvider::Vercel {
+            assert!(captured.body.get("model").is_none());
+            assert_eq!(
+                header_value(&captured.headers, "ai-model-id").as_deref(),
+                Some("future/task-model")
+            );
+        } else {
+            assert_eq!(captured.body["model"], "future/task-model");
+        }
+    }
+}
+
+#[tokio::test]
+async fn configured_custom_jev_task_uses_its_stored_endpoint_without_override() {
+    let response = br#"{"answers":{"search":{"type":"choice","choice":"unneeded","probabilities":{"needed":0.04,"unneeded":0.95,"uncertain":0.01}}}}"#;
+    let (endpoint, server) = spawn_json_server("200 OK", response).await;
+    let mut config = default_config(JevProvider::Custom);
+    config.connections.insert(
+        JevProvider::Custom,
+        JevConnection {
+            base_url: format!("{endpoint}/Task/Decision"),
+            model: "local-task-model".into(),
+        },
+    );
+    let client = crate::state::AppState::new().http_client.clone();
+    let request = super::jev_service::build_evaluation_request(
+        &client,
+        &config,
+        TEST_API_KEY,
+        json!({"text": TEST_STATE}),
+        jev_tasks::search_questions(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(request.url().as_str(), format!("{endpoint}/Task/Decision"));
+    let result = jev_tasks::evaluate(
+        &client,
+        &config,
+        TEST_API_KEY,
+        json!({"text": TEST_STATE}),
+        jev_tasks::search_questions(),
+        Duration::from_secs(1),
+        None,
+    )
+    .await;
+    let captured = timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_some());
+    assert_eq!(captured.path, "/Task/Decision");
+    assert_eq!(captured.body["model"], "local-task-model");
+}
+
+#[tokio::test]
+async fn incomplete_custom_jev_task_falls_back_without_contacting_the_configured_endpoint() {
+    let (endpoint, count, mut request_seen, mut server) =
+        spawn_counting_server("200 OK", br#"{}"#).await;
+    let mut config = default_config(JevProvider::Custom);
+    config.connections.insert(
+        JevProvider::Custom,
+        JevConnection {
+            base_url: endpoint,
+            model: String::new(),
+        },
+    );
+    let result = jev_tasks::evaluate(
+        &crate::state::AppState::new().http_client,
+        &config,
+        TEST_API_KEY,
+        json!({"text": TEST_STATE}),
+        jev_tasks::screen_questions(),
+        Duration::from_millis(100),
+        None,
+    )
+    .await;
+    assert!(result.is_none());
+    assert_no_request(&mut server, &count, &mut request_seen).await;
 }

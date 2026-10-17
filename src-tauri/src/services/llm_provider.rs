@@ -162,15 +162,21 @@ fn is_preset(provider: &str) -> bool {
 
 /// 根据后端配置获取 LLM 端点
 pub fn endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
-    let active_provider = config.resolve_active_provider();
+    endpoint_for_provider(config, &config.resolve_active_provider(), None)
+}
 
-    if is_preset(&active_provider) {
-        let (default_base_url, default_model, timeout_secs) =
-            default_endpoint_parts(&active_provider);
-        let use_custom_endpoint = active_provider == CUSTOM;
-        let api_suffix = default_api_suffix(&active_provider);
+fn endpoint_for_provider(
+    config: &LlmProviderConfig,
+    provider: &str,
+    model_override: Option<&str>,
+) -> LlmEndpoint {
+    if is_preset(provider) {
+        let (default_base_url, default_model, timeout_secs) = default_endpoint_parts(provider);
+        let use_active_overrides = provider == config.resolve_active_provider();
+        let use_custom_endpoint = provider == CUSTOM && use_active_overrides;
+        let api_suffix = default_api_suffix(provider);
         LlmEndpoint {
-            provider: active_provider.clone(),
+            provider: provider.to_string(),
             api_url: if use_custom_endpoint {
                 normalize_api_url(
                     config.custom_base_url.as_deref(),
@@ -180,9 +186,11 @@ pub fn endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
             } else {
                 normalize_api_url(None, default_base_url, api_suffix)
             },
-            model: config
-                .custom_model
-                .as_deref()
+            model: model_override
+                .or(config
+                    .custom_model
+                    .as_deref()
+                    .filter(|_| use_active_overrides))
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or(default_model)
@@ -190,11 +198,8 @@ pub fn endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
             timeout_secs,
             api_format: ApiFormat::OpenaiCompat,
         }
-    } else if let Some(cp) = config
-        .custom_providers
-        .iter()
-        .find(|p| p.id == active_provider)
-    {
+    } else if let Some(cp) = config.custom_providers.iter().find(|p| p.id == provider) {
+        let model = model_override.unwrap_or(&cp.model);
         let api_url = match cp.api_format {
             ApiFormat::Anthropic => normalize_anthropic_url(&cp.base_url),
             ApiFormat::OpenaiCompat => normalize_api_url(
@@ -204,12 +209,12 @@ pub fn endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
             ),
         };
         LlmEndpoint {
-            provider: active_provider,
+            provider: provider.to_string(),
             api_url,
-            model: if cp.model.trim().is_empty() {
+            model: if model.trim().is_empty() {
                 "gpt-4.1-mini".to_string()
             } else {
-                cp.model.clone()
+                model.to_string()
             },
             timeout_secs: if cp.api_format == ApiFormat::Anthropic {
                 30
@@ -232,131 +237,35 @@ pub fn endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
 }
 
 pub fn assistant_endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
-    let assistant_provider = config.resolve_assistant_provider();
-    let active_provider = config.resolve_active_provider();
-
-    // 构建 base config：若助手 provider 与润色不同，临时切换 active
-    let mut resolved = config.clone();
-    if assistant_provider != active_provider {
-        resolved.active = assistant_provider;
-        // 对 preset provider，清掉 custom_model/custom_base_url（不能沿用润色的覆盖值）
-        if is_preset(&resolved.active) {
-            resolved.custom_model = None;
-            resolved.custom_base_url = None;
-        }
-    }
-
-    // 叠加 assistant_model 覆盖
-    if let Some(assistant_model) = config.assistant_model() {
-        let target_provider = resolved.resolve_active_provider();
-        if is_preset(&target_provider) {
-            resolved.custom_model = Some(assistant_model.to_string());
-        } else if let Some(cp) = resolved
-            .custom_providers
-            .iter_mut()
-            .find(|p| p.id == target_provider)
-        {
-            cp.model = assistant_model.to_string();
-        } else {
-            resolved.custom_model = Some(assistant_model.to_string());
-        }
-    }
-
-    endpoint_for_config(&resolved)
+    endpoint_for_provider(
+        config,
+        &config.resolve_assistant_provider(),
+        config.assistant_model(),
+    )
 }
 
 /// Resolve the selection assistant independently while retaining the polish
 /// endpoint as the exact fallback when its separate-config switch is off.
 pub fn selection_endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
-    let provider = config.resolve_selection_provider();
-    let active_provider = config.resolve_active_provider();
-    let mut resolved = config.clone();
-
-    if provider != active_provider {
-        resolved.active = provider;
-        if is_preset(&resolved.active) {
-            resolved.custom_model = None;
-            resolved.custom_base_url = None;
-        }
-    }
-
-    if let Some(model) = config.selection_model() {
-        let target_provider = resolved.resolve_active_provider();
-        if is_preset(&target_provider) {
-            resolved.custom_model = Some(model.to_string());
-        } else if let Some(custom) = resolved
-            .custom_providers
-            .iter_mut()
-            .find(|item| item.id == target_provider)
-        {
-            custom.model = model.to_string();
-        } else {
-            resolved.custom_model = Some(model.to_string());
-        }
-    }
-
-    endpoint_for_config(&resolved)
+    endpoint_for_provider(
+        config,
+        &config.resolve_selection_provider(),
+        config.selection_model(),
+    )
 }
 
 pub fn validation_endpoint_for_config(config: &LlmProviderConfig) -> LlmEndpoint {
-    let validation_provider = config.resolve_validation_provider();
-    let active_provider = config.resolve_active_provider();
-
-    let mut resolved = config.clone();
-    if validation_provider != active_provider {
-        resolved.active = validation_provider;
-        if is_preset(&resolved.active) {
-            resolved.custom_model = None;
-            resolved.custom_base_url = None;
-        }
-    }
-
-    if let Some(validation_model) = config.validation_model() {
-        let target_provider = resolved.resolve_active_provider();
-        if is_preset(&target_provider) {
-            resolved.custom_model = Some(validation_model.to_string());
-        } else if let Some(cp) = resolved
-            .custom_providers
-            .iter_mut()
-            .find(|p| p.id == target_provider)
-        {
-            cp.model = validation_model.to_string();
-        } else {
-            resolved.custom_model = Some(validation_model.to_string());
-        }
-    }
-
-    endpoint_for_config(&resolved)
+    endpoint_for_provider(
+        config,
+        &config.resolve_validation_provider(),
+        config.validation_model(),
+    )
 }
 
 pub fn screen_vision_endpoint_for_config(config: &LlmProviderConfig) -> Option<LlmEndpoint> {
     let provider = config.resolve_screen_vision_provider()?;
     let model = config.screen_vision_model()?;
-    let active_provider = config.resolve_active_provider();
-    let mut resolved = config.clone();
-
-    if provider != active_provider {
-        resolved.active = provider;
-        if is_preset(&resolved.active) {
-            resolved.custom_model = None;
-            resolved.custom_base_url = None;
-        }
-    }
-
-    let target_provider = resolved.resolve_active_provider();
-    if is_preset(&target_provider) {
-        resolved.custom_model = Some(model.to_string());
-    } else if let Some(custom) = resolved
-        .custom_providers
-        .iter_mut()
-        .find(|item| item.id == target_provider)
-    {
-        custom.model = model.to_string();
-    } else {
-        return None;
-    }
-
-    Some(endpoint_for_config(&resolved))
+    Some(endpoint_for_provider(config, &provider, Some(model)))
 }
 
 pub fn known_image_input_support(endpoint: &LlmEndpoint) -> Option<bool> {

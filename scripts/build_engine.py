@@ -12,7 +12,7 @@
 必须在项目 .venv 环境中运行。
 """
 
-import importlib.metadata
+import filecmp
 import hashlib
 import json
 import os
@@ -30,17 +30,12 @@ DIST_DIR = RESOURCES_DIR / "python-dist"
 ENTRY_SCRIPT = RESOURCES_DIR / "engine.py"
 OUTPUT_ARCHIVE = RESOURCES_DIR / "engine.tar.xz"
 WINDOWS_MANIFEST = PROJECT_ROOT / "src-tauri" / "windows-app-manifest.xml"
-QWEN3_CUDA_PROVIDER_VERSION = "0.1.3"
-QWEN3_CUDA_PROVIDER_URL = (
-    "https://github.com/handy-computer/transcribe.cpp/releases/download/v0.1.3/"
-    "transcribe_cpp_native_cu12-0.1.3-py3-none-win_amd64.whl"
-    "#sha256=b46eef15ccce2d3248bff99fe988f081511a1116032643276ec4ef50cb1716eb"
-)
 
 # 同级 Python 脚本，打包到 _internal/
 ADD_DATA_FILES = [
     "engine.py",
     "qwen3_asr_server.py",
+    "qwen3_native.py",
     "r2t2_asr_server.py",
     "r2t2_native.py",
     "r2t2_stream.py",
@@ -53,6 +48,7 @@ ADD_DATA_FILES = [
     "FireRedVAD-LICENSE.txt",
     "download_models.py",
     "server_common.py",
+    "asr_stream_server.py",
     "gpu_idle.py",
     "hf_cache_utils.py",
 ]
@@ -70,26 +66,19 @@ HIDDEN_IMPORTS = [
     "tqdm",
     "soundfile",
     "onnxruntime",
-    "transcribe_cpp",
-    "transcribe_cpp_native_cu12",
 ]
 
 # 需要完整收集的包（子模块 + 数据文件）。
 COLLECT_ALL = [
     "kaldi_native_fbank",
-    "transcribe_cpp",
-    "transcribe_cpp_native_cu12",
-]
-
-COPY_METADATA = [
-    "transcribe-cpp",
-    "transcribe-cpp-native-cu12",
 ]
 
 EXCLUDE_MODULES = [
-    # The pinned cu12 provider includes CUDA, Vulkan and CPU. Shipping the
-    # base provider as well duplicates its Vulkan backend and support DLLs.
+    # Qwen and R2T2 use the shared audio.cpp runtime, even when these retired
+    # packages remain installed in the build environment.
+    "transcribe_cpp",
     "transcribe_cpp_native",
+    "transcribe_cpp_native_cu12",
     "faster_whisper",
     "ctranslate2",
     "av",
@@ -130,37 +119,6 @@ EXCLUDE_MODULES = [
     "oss2",
 ]
 
-
-def ensure_qwen3_cuda_provider() -> None:
-    """Install the pinned CUDA provider without duplicate NVIDIA runtime wheels."""
-    try:
-        installed = importlib.metadata.version("transcribe-cpp-native-cu12")
-    except importlib.metadata.PackageNotFoundError:
-        installed = None
-    if installed == QWEN3_CUDA_PROVIDER_VERSION:
-        return
-
-    uv = shutil.which("uv")
-    if not uv:
-        raise RuntimeError("构建 Qwen3-ASR CUDA 引擎需要 uv，但当前 PATH 中未找到")
-    cmd = [
-        uv,
-        "pip",
-        "install",
-        "--python",
-        sys.executable,
-        "--no-deps",
-        QWEN3_CUDA_PROVIDER_URL,
-    ]
-    if installed is not None:
-        cmd.insert(-1, "--reinstall")
-    subprocess.run(cmd, check=True)
-
-    actual = importlib.metadata.version("transcribe-cpp-native-cu12")
-    if actual != QWEN3_CUDA_PROVIDER_VERSION:
-        raise RuntimeError(
-            f"Qwen3-ASR CUDA provider 版本错误: got={actual}, expected={QWEN3_CUDA_PROVIDER_VERSION}"
-        )
 
 # Windows 运行时不需要 .lib / .pdb；这些仅用于链接或调试。
 STRIP_DEV_ARTIFACT_PATTERNS = [
@@ -247,11 +205,8 @@ def get_size_mb(path: Path) -> float:
 
 
 def strip_dev_artifacts(engine_dir: Path) -> float:
-    """删除运行时不需要的链接/调试产物，返回节省的 MB 数。"""
+    """删除链接/调试产物及退役的 Vulkan DLL，返回节省的 MB 数。"""
     internal_dir = engine_dir / "_internal"
-    if not internal_dir.is_dir():
-        return 0.0
-
     saved = 0.0
     for pattern in STRIP_DEV_ARTIFACT_PATTERNS:
         for match in internal_dir.rglob(pattern):
@@ -261,6 +216,14 @@ def strip_dev_artifacts(engine_dir: Path) -> float:
             print(f"  删除: {match.relative_to(engine_dir)} ({size:.0f} MB)")
             match.unlink()
             saved += size
+
+    for match in engine_dir.rglob("*"):
+        if not match.is_file() or match.name.casefold() not in {"ggml-vulkan.dll", "vulkan-1.dll"}:
+            continue
+        size = match.stat().st_size / (1024 * 1024)
+        print(f"  删除: {match.relative_to(engine_dir)} ({size:.0f} MB)")
+        match.unlink()
+        saved += size
 
     return saved
 
@@ -277,6 +240,11 @@ def share_native_runtime_dlls(engine_dir: Path) -> float:
         "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll", "vcomp140.dll",
     }
     saved = 0
+    local = internal / "kaldi_native_fbank" / "lib" / "kaldi-native-fbank-core.dll"
+    common = internal / "kaldi-native-fbank-core.dll"
+    if local.is_file() and common.is_file() and filecmp.cmp(local, common, shallow=False):
+        saved += local.stat().st_size
+        local.unlink()
     for manifest_path in (internal / "r2t2-native").glob("*/runtime-manifest.json"):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         shared = {}
@@ -312,6 +280,7 @@ def create_tar_xz_with_python(engine_dir: Path, output: Path) -> float:
     """使用 Python 标准库压缩为 tar.xz，返回压缩包大小 MB。"""
     print(f"正在压缩到 {output.name} ...")
     files = [f for f in engine_dir.rglob("*") if f.is_file()]
+    files.sort(key=lambda f: (-f.stat().st_size, f.relative_to(engine_dir).as_posix()))
     total = len(files)
 
     with tarfile.open(output, mode="w:xz", preset=9) as tf:
@@ -332,6 +301,7 @@ def create_tar_xz_with_7z(engine_dir: Path, output: Path, seven_zip: str) -> flo
     output = output.resolve()
     tar_path = output.with_suffix("")  # engine.tar
     files = [f for f in engine_dir.rglob("*") if f.is_file()]
+    files.sort(key=lambda f: (-f.stat().st_size, f.relative_to(engine_dir).as_posix()))
     total = len(files)
     if not files:
         raise RuntimeError("engine 目录为空，无法创建归档")
@@ -350,7 +320,9 @@ def create_tar_xz_with_7z(engine_dir: Path, output: Path, seven_zip: str) -> flo
     # 阶段 2: 用 7z 压缩为 xz
     tar_mb = tar_path.stat().st_size / (1024 * 1024)
     print(f"  阶段 2/2: 7-Zip 多线程压缩 xz ({tar_mb:.0f} MB)")
-    cmd = [seven_zip, "a", "-txz", "-mx=9", "-mmt=on", str(output), str(tar_path)]
+    # Keep native libraries in one dictionary history; BCJ compresses x86 code.
+    cmd = [seven_zip, "a", "-txz", "-mx=9", "-mmt=2", "-ms=on", "-md=256m",
+           "-mf=BCJ", str(output), str(tar_path)]
     try:
         subprocess.run(cmd, check=True, cwd=output.parent)
     finally:
@@ -409,15 +381,48 @@ def validate_r2t2_runtime():
 
 
 def verify_archive_sources(archive: Path) -> None:
-    """Reject stale bundled Python code before building an installer."""
+    """Reject stale Python sources and R2T2 native builds in reused archives."""
     expected = {
         f"_internal/{name}": (RESOURCES_DIR / name).read_bytes().replace(b"\r\n", b"\n")
         for name in ADD_DATA_FILES if name.endswith(".py")
     }
     seen = set()
+    native_paths = {
+        f"_internal/r2t2-native/{backend}/{filename}"
+        for backend in ("cpu", "cuda")
+        for filename in ("runtime-manifest.json", "audiocpp.dll")
+    }
+    native = {}
+    retired_packages = {"transcribe_cpp", "transcribe_cpp_native", "transcribe_cpp_native_cu12"}
     with tarfile.open(archive, mode="r|xz") as packaged:
         for member in packaged:
             name = member.name.removeprefix("./")
+            normalized = member.name.replace("\\", "/").casefold().lstrip("./")
+            for component in normalized.split("/"):
+                distribution = component.removesuffix(".dist-info").rsplit("-", 1)[0].replace("-", "_")
+                if (component in retired_packages
+                        or component.endswith(".dist-info") and distribution in retired_packages):
+                    raise RuntimeError(f"Retired transcribe.cpp package in bundled archive: {name}; rebuild the engine")
+            if (normalized == "_internal/r2t2-native/vulkan"
+                    or normalized.startswith("_internal/r2t2-native/vulkan/")
+                    or normalized.rsplit("/", 1)[-1] in {"ggml-vulkan.dll", "vulkan-1.dll"}):
+                raise RuntimeError(f"Retired Vulkan runtime in bundled archive: {name}; rebuild the engine")
+            if name in native_paths:
+                if name in native or not member.isfile():
+                    raise RuntimeError(f"Invalid bundled native file: {name}; rebuild the engine")
+                with packaged.extractfile(member) as stream:
+                    if name.endswith("runtime-manifest.json"):
+                        # Dependency metadata is small; never buffer a DLL-sized manifest.
+                        if member.size > 64 * 1024:
+                            raise RuntimeError(f"Invalid bundled native manifest: {name}")
+                        try:
+                            native[name] = json.load(stream)
+                        except (ValueError, UnicodeError) as error:
+                            raise RuntimeError(f"Invalid bundled native manifest: {name}") from error
+                    else:
+                        native[name] = {"size": member.size,
+                                        "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
+                continue
             if name not in expected:
                 continue
             source = expected[name]
@@ -431,6 +436,21 @@ def verify_archive_sources(archive: Path) -> None:
     missing = expected.keys() - seen
     if missing:
         raise RuntimeError(f"Missing bundled sources: {', '.join(sorted(missing))}; rebuild the engine")
+    missing_native = native_paths - native.keys()
+    if missing_native:
+        raise RuntimeError(f"Missing bundled native files: {', '.join(sorted(missing_native))}; rebuild the engine")
+    provenance = {"build_id": R2T2_BUILD_ID, "revision": R2T2_REVISION,
+                  "patch_sha256": hashlib.sha256(R2T2_PATCH.read_bytes()).hexdigest()}
+    for backend in ("cpu", "cuda"):
+        prefix = f"_internal/r2t2-native/{backend}"
+        manifest = native[f"{prefix}/runtime-manifest.json"]
+        if (not isinstance(manifest, dict)
+                or manifest.get("backend") != backend
+                or any(manifest.get(key) != value for key, value in provenance.items())):
+            raise RuntimeError(f"Stale bundled R2T2 {backend} runtime; rebuild the engine")
+        files = manifest.get("files")
+        if not isinstance(files, dict) or files.get("audiocpp.dll") != native[f"{prefix}/audiocpp.dll"]:
+            raise RuntimeError(f"Bundled R2T2 {backend} library checksum/size mismatch; rebuild the engine")
 
 
 def main():
@@ -439,7 +459,6 @@ def main():
         sys.exit(1)
 
     native_runtime = validate_r2t2_runtime()
-    ensure_qwen3_cuda_provider()
 
     # 清理旧构建
     if DIST_DIR.exists():
@@ -457,12 +476,14 @@ def main():
         "--distpath", str(DIST_DIR),
         "--workpath", str(work_dir),
         "--specpath", str(spec_dir),
+        "--additional-hooks-dir", str(PROJECT_ROOT / "scripts" / "pyinstaller_hooks"),
     ]
 
     if WINDOWS_MANIFEST.exists():
         cmd.extend(["--manifest", str(WINDOWS_MANIFEST)])
 
-    cmd.extend(["--add-data", f"{native_runtime}{os.pathsep}r2t2-native"])
+    for backend in ("cpu", "cuda"):
+        cmd.extend(["--add-data", f"{native_runtime / backend}{os.pathsep}r2t2-native/{backend}"])
 
     for filename in ADD_DATA_FILES:
         src = RESOURCES_DIR / filename
@@ -476,9 +497,6 @@ def main():
 
     for pkg in COLLECT_ALL:
         cmd.extend(["--collect-all", pkg])
-
-    for distribution in COPY_METADATA:
-        cmd.extend(["--copy-metadata", distribution])
 
     for mod in EXCLUDE_MODULES:
         cmd.extend(["--exclude-module", mod])

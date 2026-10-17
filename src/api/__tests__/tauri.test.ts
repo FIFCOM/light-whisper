@@ -1,8 +1,8 @@
 /**
- * TDD red-state tests for structured IPC error normalization in
+ * Regression tests for structured IPC error normalization in
  * `src/api/tauri.ts`.
  *
- * Contract (to be implemented):
+ * Contract:
  *   - `IpcError` is a named export class extending `Error` with
  *     readonly `code`, `category`, `details` fields.
  *   - When `invoke(...)` rejects with a structured object shaped
@@ -12,8 +12,8 @@
  *     instances continue to flow through `normalizeInvokeError` as
  *     plain `Error` (not `IpcError`).
  *
- * All tests drive through the public `transcribeAudio` wrapper, which
- * calls `invoke("transcribe_audio", { audioBase64 })`. We mock
+ * Error tests drive through the live `startRecording` wrapper, which
+ * calls `invoke("start_recording")`. We mock
  * `@tauri-apps/api/core` so we can deterministically reject `invoke`
  * and inspect the wrapped error.
  */
@@ -35,6 +35,40 @@ vi.mock("@tauri-apps/plugin-autostart", () => ({
 
 beforeEach(() => {
   invokeMock.invoke.mockReset();
+});
+
+describe("Decision connection IPC", () => {
+  it("reads defaults and saves arbitrary connection fields for an explicit provider", async () => {
+    const { getJevConnection, setJevConnection } = await import("@/api/tauri");
+    const connection = { base_url: "http://127.0.0.1:8123/Decision/Custom", model: "future/local-model" };
+    invokeMock.invoke.mockResolvedValueOnce(connection);
+    await expect(getJevConnection("custom")).resolves.toEqual(connection);
+    expect(invokeMock.invoke).toHaveBeenLastCalledWith("get_jev_connection", { provider: "custom" });
+    invokeMock.invoke.mockResolvedValueOnce(undefined);
+    await setJevConnection("liquid", connection.base_url, connection.model);
+    expect(invokeMock.invoke).toHaveBeenLastCalledWith("set_jev_connection", {
+      provider: "liquid", baseUrl: connection.base_url, model: connection.model,
+    });
+  });
+
+  it("keeps Custom credentials in the provider-specific key command", async () => {
+    const { getJevApiKey, setJevApiKey, setJevConnection } = await import("@/api/tauri");
+    invokeMock.invoke.mockResolvedValue(undefined).mockResolvedValueOnce("custom-synthetic-key");
+    await expect(getJevApiKey("custom")).resolves.toBe("custom-synthetic-key");
+    expect(invokeMock.invoke).toHaveBeenLastCalledWith("get_jev_api_key", { provider: "custom" });
+    await setJevApiKey("custom", "custom-synthetic-key");
+    expect(invokeMock.invoke).toHaveBeenLastCalledWith("set_jev_api_key", {
+      provider: "custom", apiKey: "custom-synthetic-key",
+    });
+    await setJevConnection("custom", "", "");
+    expect(invokeMock.invoke).toHaveBeenLastCalledWith("set_jev_connection", { provider: "custom", baseUrl: "", model: "" });
+  });
+
+  it("propagates connection validation failures to the settings UI", async () => {
+    const { setJevConnection } = await import("@/api/tauri");
+    invokeMock.invoke.mockRejectedValueOnce("Invalid decision connection");
+    await expect(setJevConnection("vercel", "bad-url", "model")).rejects.toThrow(/invalid/i);
+  });
 });
 
 afterEach(() => {
@@ -70,10 +104,18 @@ describe("ChatGPT registration IPC", () => {
 });
 
 describe("normalizeInvokeError -> IpcError", () => {
+  it("returns the recording session ID from the no-argument command", async () => {
+    const { startRecording } = await import("@/api/tauri");
+    invokeMock.invoke.mockResolvedValueOnce(42);
+
+    await expect(startRecording()).resolves.toBe(42);
+    expect(invokeMock.invoke).toHaveBeenCalledWith("start_recording");
+  });
+
   it("structured_error_object_becomes_IpcError", async () => {
     const mod = await import("@/api/tauri");
-    const { transcribeAudio, IpcError } = mod as {
-      transcribeAudio: (audioBase64: string) => Promise<unknown>;
+    const { startRecording, IpcError } = mod as {
+      startRecording: () => Promise<number>;
       IpcError: new (
         message: string,
         code: string,
@@ -91,7 +133,7 @@ describe("normalizeInvokeError -> IpcError", () => {
 
     let caught: unknown;
     try {
-      await transcribeAudio("base64");
+      await startRecording();
     } catch (err) {
       caught = err;
     }
@@ -109,8 +151,8 @@ describe("normalizeInvokeError -> IpcError", () => {
 
   it("IpcError_carries_details_field", async () => {
     const mod = await import("@/api/tauri");
-    const { transcribeAudio, IpcError } = mod as {
-      transcribeAudio: (audioBase64: string) => Promise<unknown>;
+    const { startRecording, IpcError } = mod as {
+      startRecording: () => Promise<number>;
       IpcError: new (
         message: string,
         code: string,
@@ -128,7 +170,7 @@ describe("normalizeInvokeError -> IpcError", () => {
 
     let caught: unknown;
     try {
-      await transcribeAudio("base64");
+      await startRecording();
     } catch (err) {
       caught = err;
     }
@@ -140,8 +182,8 @@ describe("normalizeInvokeError -> IpcError", () => {
 
   it("plain_string_rejection_produces_plain_Error_not_IpcError", async () => {
     const mod = await import("@/api/tauri");
-    const { transcribeAudio, IpcError } = mod as {
-      transcribeAudio: (audioBase64: string) => Promise<unknown>;
+    const { startRecording, IpcError } = mod as {
+      startRecording: () => Promise<number>;
       IpcError: new (
         message: string,
         code: string,
@@ -154,7 +196,7 @@ describe("normalizeInvokeError -> IpcError", () => {
 
     let caught: unknown;
     try {
-      await transcribeAudio("base64");
+      await startRecording();
     } catch (err) {
       caught = err;
     }
@@ -166,8 +208,8 @@ describe("normalizeInvokeError -> IpcError", () => {
 
   it("object_without_code_falls_back_to_plain_Error", async () => {
     const mod = await import("@/api/tauri");
-    const { transcribeAudio, IpcError } = mod as {
-      transcribeAudio: (audioBase64: string) => Promise<unknown>;
+    const { startRecording, IpcError } = mod as {
+      startRecording: () => Promise<number>;
       IpcError: new (
         message: string,
         code: string,
@@ -183,7 +225,7 @@ describe("normalizeInvokeError -> IpcError", () => {
 
     let caught: unknown;
     try {
-      await transcribeAudio("base64");
+      await startRecording();
     } catch (err) {
       caught = err;
     }
@@ -195,8 +237,8 @@ describe("normalizeInvokeError -> IpcError", () => {
 
   it("Error_instance_passes_through", async () => {
     const mod = await import("@/api/tauri");
-    const { transcribeAudio } = mod as {
-      transcribeAudio: (audioBase64: string) => Promise<unknown>;
+    const { startRecording } = mod as {
+      startRecording: () => Promise<number>;
     };
 
     const native = new Error("native");
@@ -204,7 +246,7 @@ describe("normalizeInvokeError -> IpcError", () => {
 
     let caught: unknown;
     try {
-      await transcribeAudio("base64");
+      await startRecording();
     } catch (err) {
       caught = err;
     }
@@ -658,14 +700,14 @@ describe("setPolishStructureLevel payload", () => {
 });
 
 describe("screen vision IPC payloads", () => {
-  it("persists one shared screen-context switch", async () => {
-    const { setScreenContextEnabled } = await import("@/api/tauri");
+  it.each(["on", "off", "auto"] as const)("persists the shared screen-context mode %s", async (mode) => {
+    const { setScreenContextMode } = await import("@/api/tauri");
     invokeMock.invoke.mockResolvedValueOnce(undefined);
 
-    await setScreenContextEnabled(true);
+    await setScreenContextMode(mode);
 
-    expect(invokeMock.invoke).toHaveBeenCalledWith("set_screen_context_enabled", {
-      enabled: true,
+    expect(invokeMock.invoke).toHaveBeenCalledWith("set_screen_context_mode", {
+      mode,
     });
   });
 

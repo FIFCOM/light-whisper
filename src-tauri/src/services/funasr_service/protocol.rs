@@ -72,7 +72,7 @@ pub enum ServerCommand {
 ///
 /// 这个结构体对应 Python 服务器返回的 JSON 格式。
 /// `Option<T>` 表示字段可能存在也可能不存在。
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(super) struct ServerResponse {
     pub(super) tentative_text: Option<String>,
     pub(super) session_id: Option<u64>,

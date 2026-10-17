@@ -14,17 +14,17 @@ of the integration adapted from upstream, remain subject to the Apache License
 Light-Whisper's original integration and post-processing changes are licensed
 under GPL-3.0-only.
 
-## transcribe.cpp and downloaded models
+## Qwen3-ASR downloaded models
 
-[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) is distributed
-under the MIT License. Qwen3-ASR model files are downloaded separately and
+Qwen3-ASR runs through the shared audio.cpp runtime described below.
+Model files are downloaded separately and
 remain subject to the terms published by their respective upstream providers.
 
 Package-manager dependencies may carry additional licenses. Their inclusion in
 the source tree, Python engine, or application bundle does not change those
 licenses.
 
-## Confucius4-R2T2 native runtime and model
+## Shared audio.cpp native runtime and Confucius4-R2T2 model
 
 [audio.cpp](https://github.com/0xShug0/audio.cpp), copyright 2026 ShugoAI LLC,
 is distributed under Apache-2.0. The build pins revision

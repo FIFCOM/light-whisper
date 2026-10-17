@@ -7,7 +7,7 @@ use tauri::Emitter;
 use tokio::sync::Semaphore;
 
 use super::{jev_service, jev_tasks};
-use crate::state::user_profile::{CorrectionSource, UserProfile};
+use crate::state::user_profile::{CorrectionSource, JevConfig, UserProfile};
 
 const REVIEW_TIMEOUT: Duration = Duration::from_secs(5);
 const CORRECTION_BATCH_SIZE: usize = 40;
@@ -46,7 +46,7 @@ pub fn schedule_polish_audit(
         let key = jev_service::load_api_key_for_provider(&app, config.provider).unwrap_or_default();
         let result = jev_tasks::evaluate(
             &client,
-            config.provider,
+            &config,
             &key,
             evidence,
             jev_tasks::audit_questions(),
@@ -124,14 +124,14 @@ fn audit_report(session_id: u64, response: &Value) -> Option<Value> {
 
 pub async fn review_corrections(
     client: &reqwest::Client,
-    provider: jev_service::JevProvider,
+    config: &JevConfig,
     key: &str,
     rules: &[(String, String)],
     endpoint_override: Option<&str>,
 ) -> Option<HashSet<(String, String)>> {
     let mut invalid = HashSet::new();
     for batch in rules.chunks(CORRECTION_BATCH_SIZE) {
-        let response = jev_tasks::evaluate(client, provider, key,
+        let response = jev_tasks::evaluate(client, config, key,
             json!({"rules":batch.iter().map(|(original,corrected)| json!({"original":original,"corrected":corrected})).collect::<Vec<_>>(),
                 "evidence_limit":"Only learned word pairs are available, not audio or original sentences. Context-dependent substitutions are uncertain."}),
             jev_tasks::correction_questions(batch.len()), REVIEW_TIMEOUT, endpoint_override).await?;
@@ -157,6 +157,54 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn configured_custom_jev_correction_review_uses_stored_connection_without_override() {
+        use crate::state::user_profile::{JevConnection, JevProvider};
+        let response = br#"{"answers":{"rule_0":{"type":"choice","choice":"invalid","probabilities":{"valid":0.02,"invalid":0.96,"uncertain":0.02}}}}"#;
+        let (endpoint, server) =
+            crate::services::jev_service_tests::spawn_json_server("200 OK", response).await;
+        let mut config = JevConfig {
+            provider: JevProvider::Custom,
+            ..JevConfig::default()
+        };
+        config.connections.insert(
+            JevProvider::Custom,
+            JevConnection {
+                base_url: format!("{endpoint}/Review/Decision"),
+                model: "local-review-decider".into(),
+            },
+        );
+        let client = crate::state::AppState::new().http_client.clone();
+        let request = jev_service::build_evaluation_request(
+            &client,
+            &config,
+            "review-test-key",
+            json!({}),
+            jev_tasks::correction_questions(1),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            format!("{endpoint}/Review/Decision")
+        );
+        let rules = vec![("original".into(), "corrected".into())];
+        let invalid = review_corrections(&client, &config, "review-test-key", &rules, None)
+            .await
+            .unwrap();
+        let captured = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.path, "/Review/Decision");
+        assert_eq!(captured.body["model"], "local-review-decider");
+        assert_eq!(
+            captured.body["state"]["rules"][0],
+            json!({"original":"original", "corrected":"corrected"})
+        );
+        assert_eq!(invalid, HashSet::from([rules[0].clone()]));
+    }
 
     #[test]
     fn applying_review_preserves_user_rules_and_reports_actual_removals() {
@@ -276,7 +324,10 @@ mod tests {
             .collect::<Vec<_>>();
         let invalid = review_corrections(
             &reqwest::Client::new(),
-            jev_service::JevProvider::Vercel,
+            &JevConfig {
+                provider: jev_service::JevProvider::Vercel,
+                ..JevConfig::default()
+            },
             "test-key",
             &rules,
             Some(&endpoint),

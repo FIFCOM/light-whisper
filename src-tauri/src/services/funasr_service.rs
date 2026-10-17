@@ -43,6 +43,9 @@ mod protocol;
 mod native_stream_tests;
 
 #[cfg(all(test, target_os = "windows"))]
+mod native_stream_hotword_tests;
+
+#[cfg(all(test, target_os = "windows"))]
 mod ipc_recovery_tests;
 
 #[cfg(test)]
@@ -126,8 +129,8 @@ pub struct ModelCheckResult {
     pub corrupt_models: Vec<String>,
 }
 
-const QWEN3_ASR_06_REPO_ID: &str = "handy-computer/Qwen3-ASR-0.6B-gguf";
-const QWEN3_ASR_06_FILENAME: &str = "Qwen3-ASR-0.6B-Q8_0.gguf";
+const QWEN3_ASR_06_REPO_ID: &str = "audio-cpp/audio.cpp-gguf";
+const QWEN3_ASR_06_FILENAME: &str = "Qwen3-ASR-0.6B-GGUF/qwen3-asr-0.6b-q8_0.gguf";
 const R2T2_REPO_ID: &str = "davidxifeng/Confucius4-R2T2-gguf";
 const R2T2_FILENAME: &str = "r2t2-q8_0.gguf";
 const HF_COMPLETE_MANIFEST_NAME: &str = ".light_whisper_complete.json";
@@ -1947,11 +1950,9 @@ mod model_readiness_tests {
         };
         let missing = inspect();
         let selected = snapshot(super::QWEN3_ASR_06_REPO_ID);
-        std::fs::rename(
-            selected.join("model.gguf"),
-            selected.join(super::QWEN3_ASR_06_FILENAME),
-        )
-        .unwrap();
+        let selected_weight = selected.join(super::QWEN3_ASR_06_FILENAME);
+        std::fs::create_dir_all(selected_weight.parent().unwrap()).unwrap();
+        std::fs::rename(selected.join("model.gguf"), selected_weight).unwrap();
         let ready = inspect();
         std::fs::write(selected.join(super::HF_COMPLETE_MANIFEST_NAME), "{").unwrap();
         let corrupt = inspect();

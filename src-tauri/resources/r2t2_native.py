@@ -1,4 +1,4 @@
-"""Resident Windows-native R2T2 inference through audio.cpp's C ABI.
+"""Resident Windows-native ASR inference through audio.cpp's C ABI.
 
 The caller serializes access. Native push/finish cannot be interrupted safely
 from another thread; cancellation happens between bounded calls or by stopping
@@ -26,12 +26,15 @@ class NativeRuntime:
     FINISH_CONTEXT_SAMPLES = SAMPLE_RATE * 320 // 1000
 
     def __init__(self, model_path, library_path, *, backend='cuda', chunk_ms=320,
-                 threads=4, dll_directories=(), rolling=False):
+                 threads=4, dll_directories=(), rolling=False,
+                 family='confucius4_r2t2', mode='streaming'):
+        self._display_name = 'R2T2' if family == 'confucius4_r2t2' else 'Qwen3-ASR'
         if backend not in ('cpu', 'cuda'):
-            raise ValueError('Unsupported R2T2 backend')
+            raise ValueError(f'Unsupported {self._display_name} backend')
         if not isinstance(rolling, bool):
             raise ValueError('rolling must be a boolean')
         self.backend = backend
+        self._mode = mode
         self.rolling = rolling
         if not isinstance(chunk_ms, int) or isinstance(chunk_ms, bool) or not 80 <= chunk_ms <= 2000:
             raise ValueError('chunk_ms must be an integer from 80 to 2000')
@@ -55,21 +58,22 @@ class NativeRuntime:
             self.lib = ct.CDLL(str(library_path))
             self._bind()
             self._call('registry_create', None, ct.byref(self.registry))
-            config = _ModelConfig(b'confucius4_r2t2', None, None, None)
+            config = _ModelConfig(family.encode('utf-8'), None, None, None)
             self._call('model_load', self.registry, str(Path(model_path).resolve()).encode('utf-8'),
                        ct.byref(config), None, ct.byref(self.model))
             options = self.functions['options_create']()
             if not options:
                 raise RuntimeError('Cannot allocate audio.cpp options')
             try:
-                # Keep the upstream validated conservative rollback defaults.
-                self._call('options_set', options, b'confucius4_r2t2.chunk_size_ms', str(chunk_ms).encode())
-                if rolling:
-                    self._call('options_set', options, b'confucius4_r2t2.rolling_window', b'true')
-                    # Commit sentence endings using R2T2's native policy, so a
-                    # completed suffix is not kept behind rollback at a roll.
-                    self._call('options_set', options, b'confucius4_r2t2.rollback_punctuation', b'true')
-                self._call('session_create', self.model, b'asr', b'streaming',
+                if family == 'confucius4_r2t2':
+                    # Keep the upstream validated conservative rollback defaults.
+                    self._call('options_set', options, b'confucius4_r2t2.chunk_size_ms', str(chunk_ms).encode())
+                    if rolling:
+                        self._call('options_set', options, b'confucius4_r2t2.rolling_window', b'true')
+                        # Commit sentence endings using R2T2's native policy, so a
+                        # completed suffix is not kept behind rollback at a roll.
+                        self._call('options_set', options, b'confucius4_r2t2.rollback_punctuation', b'true')
+                self._call('session_create', self.model, b'asr', mode.encode('utf-8'),
                            ct.byref(_BackendConfig(backend.encode(), 0, threads)), options,
                            ct.byref(self.session))
             finally:
@@ -108,6 +112,12 @@ class NativeRuntime:
             'result_text': (I, [H, P(S), P(S)]),
             'result_preview_text': (I, [H, P(S)]),
         }
+        if getattr(self, '_mode', 'streaming') == 'offline':
+            signatures.update({
+                'session_run': (I, [H, H, P(H)]),
+                'request_set_audio': (I, [H, P(ct.c_float), ct.c_size_t, I, I]),
+                'request_set_option': (I, [H, S, S]),
+            })
         for kind in ('registry', 'model', 'session', 'options', 'request', 'result', 'event'):
             signatures[kind + '_free'] = (None, [H])
         for name, (result, arguments) in signatures.items():
@@ -119,7 +129,7 @@ class NativeRuntime:
         status = self.functions[name](*args)
         if status:
             detail = (self.functions['last_error']() or b'unknown error').decode('utf-8', errors='replace')
-            raise RuntimeError(f'R2T2 {name} failed ({status}): {detail}')
+            raise RuntimeError(f'{getattr(self, "_display_name", "R2T2")} {name} failed ({status}): {detail}')
 
     def _read_text(self, result):
         text, language = ct.c_char_p(), ct.c_char_p()
@@ -128,7 +138,7 @@ class NativeRuntime:
             return '', None
         if status:
             detail = self.functions['last_error']().decode('utf-8', errors='replace')
-            raise RuntimeError(f'R2T2 result_text failed ({status}): {detail}')
+            raise RuntimeError(f'{getattr(self, "_display_name", "R2T2")} result_text failed ({status}): {detail}')
         return (text.value or b'').decode('utf-8'), (language.value or b'').decode('utf-8') or None
 
     def start(self, context='', language=None):

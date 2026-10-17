@@ -34,7 +34,7 @@ pub fn spawn_interim_loop(
         let engine = paths::read_engine_config();
         let mut previous_hypothesis: Option<String> = None;
         // 会话级重采样缓存：只对新增的原始增量执行一次重采样，结果追加到这里
-        // 原生 16k 设备时与原始数据相同（resample_to_16k 走零拷贝路径）
+        // 原生 16k 设备时直接复用原始样本
         let mut resampled_cache: Vec<i16> = Vec::new();
         // 已写入 resampled_cache 的原始样本数（raw sample index）
         let mut raw_processed: usize = 0;

@@ -61,7 +61,7 @@ pub struct VocabEntry {
 ///
 /// The serde names are part of the persisted profile contract. Keep them
 /// lowercase so existing profiles and the frontend use the same values.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum JevProvider {
     #[default]
@@ -69,6 +69,15 @@ pub enum JevProvider {
     OpenRouter,
     Vercel,
     Liquid,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct JevConnection {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +94,8 @@ pub struct JevConfig {
     pub search_routing: bool,
     #[serde(default)]
     pub polish_audit: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub connections: HashMap<JevProvider, JevConnection>,
 }
 
 impl Default for JevConfig {
@@ -96,6 +107,7 @@ impl Default for JevConfig {
             correction_review: false,
             search_routing: false,
             polish_audit: false,
+            connections: HashMap::new(),
         }
     }
 }

@@ -1,6 +1,6 @@
-use super::{apply_screen_context_mode, apply_web_search_mode, FeatureMode};
+use super::{apply_jev_connection, apply_screen_context_mode, apply_web_search_mode, FeatureMode};
 use crate::state::user_profile::{
-    CorrectionPattern, CorrectionSource, JevProvider, UserProfile, WebSearchProvider,
+    CorrectionPattern, CorrectionSource, JevConnection, JevProvider, UserProfile, WebSearchProvider,
 };
 
 fn seeded_profile() -> UserProfile {
@@ -121,4 +121,124 @@ fn web_search_modes_update_search_and_jev_routing_without_touching_other_setting
             )
         );
     }
+}
+
+#[test]
+fn jev_connections_round_trip_for_each_provider_without_selecting_or_changing_modes() {
+    let before = seeded_profile();
+    let mut profile = before.clone();
+    let providers = [
+        JevProvider::TypeSafe,
+        JevProvider::OpenRouter,
+        JevProvider::Vercel,
+        JevProvider::Liquid,
+        JevProvider::Custom,
+    ];
+    for (index, provider) in providers.into_iter().enumerate() {
+        apply_jev_connection(
+            &mut profile,
+            provider,
+            JevConnection {
+                base_url: format!("  http://127.0.0.1:{}/Decision/{}  ", 8100 + index, index),
+                model: format!("  provider-{index}/future-model  "),
+            },
+        )
+        .expect("valid provider connection should persist");
+        assert_eq!(profile.jev.connections.len(), index + 1);
+        assert_eq!(
+            profile.jev.connections[&provider].base_url,
+            format!("http://127.0.0.1:{}/Decision/{}", 8100 + index, index)
+        );
+        assert_eq!(
+            profile.jev.connections[&provider].model,
+            format!("provider-{index}/future-model")
+        );
+        let mut expected = serde_json::to_value(&before).unwrap();
+        let mut actual = serde_json::to_value(&profile).unwrap();
+        expected["jev"]
+            .as_object_mut()
+            .unwrap()
+            .remove("connections");
+        actual["jev"].as_object_mut().unwrap().remove("connections");
+        assert_eq!(
+            actual, expected,
+            "connection save must preserve all other profile fields"
+        );
+    }
+    let restored: UserProfile =
+        serde_json::from_value(serde_json::to_value(&profile).unwrap()).unwrap();
+    assert_eq!(restored.jev, profile.jev);
+}
+
+#[test]
+fn invalid_jev_connection_never_mutates_existing_or_other_provider_entries() {
+    let mut profile = seeded_profile();
+    profile.jev.connections.insert(
+        JevProvider::Custom,
+        JevConnection {
+            base_url: "http://127.0.0.1:8123/v1".into(),
+            model: "saved-model".into(),
+        },
+    );
+    for (provider, base_url, model) in [
+        (
+            JevProvider::Custom,
+            "https://secret-user:secret-password@decision.example/v1",
+            "new-model",
+        ),
+        (JevProvider::TypeSafe, "relative-secret", "new-model"),
+        (
+            JevProvider::Vercel,
+            "http://127.0.0.1:8123/v1",
+            "secret\r\nheader: injected",
+        ),
+    ] {
+        let before = serde_json::to_value(&profile).unwrap();
+        let error = apply_jev_connection(
+            &mut profile,
+            provider,
+            JevConnection {
+                base_url: base_url.into(),
+                model: model.into(),
+            },
+        )
+        .expect_err("invalid connection must fail atomically");
+        assert!(!error.contains("secret"));
+        assert_eq!(serde_json::to_value(&profile).unwrap(), before);
+    }
+}
+
+#[test]
+fn jev_connection_reset_retains_independent_other_provider_configuration() {
+    let mut profile = seeded_profile();
+    for provider in [JevProvider::TypeSafe, JevProvider::Custom] {
+        apply_jev_connection(
+            &mut profile,
+            provider,
+            JevConnection {
+                base_url: "http://127.0.0.1:8123/v1".into(),
+                model: "future-model".into(),
+            },
+        )
+        .unwrap();
+    }
+    apply_jev_connection(
+        &mut profile,
+        JevProvider::TypeSafe,
+        JevConnection {
+            base_url: "  ".into(),
+            model: "  ".into(),
+        },
+    )
+    .unwrap();
+    let resolved =
+        crate::services::jev_service::connection_for(&profile.jev, JevProvider::TypeSafe);
+    assert_eq!(resolved.base_url, "https://api.typesafe.ai/v1/systemone");
+    assert_eq!(resolved.model, "jev-1.13.0");
+    assert_eq!(
+        profile.jev.connections[&JevProvider::Custom].model,
+        "future-model"
+    );
+    assert_eq!(profile.jev.provider, JevProvider::Vercel);
+    assert!(profile.jev.enabled && profile.jev.polish_audit && profile.jev.correction_review);
 }

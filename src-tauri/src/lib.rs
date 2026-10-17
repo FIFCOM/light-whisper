@@ -294,6 +294,8 @@ pub fn run() {
             commands::ai_polish::get_assistant_api_key,
             commands::jev::set_jev_config,
             commands::jev::set_jev_provider,
+            commands::jev::get_jev_connection,
+            commands::jev::set_jev_connection,
             commands::jev::set_polish_mode,
             commands::jev::set_jev_features,
             commands::jev::set_screen_context_mode,

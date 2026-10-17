@@ -158,30 +158,14 @@ impl ResamplerState {
     }
 }
 
-#[allow(dead_code)]
-pub(super) fn resample_to_16k(input: &[i16], input_rate: u32) -> Result<Cow<'_, [i16]>, String> {
-    if input.is_empty() || input_rate == TARGET_SAMPLE_RATE {
-        return Ok(Cow::Borrowed(input));
-    }
-
-    let mut resampler = ChunkedResampler::new(input_rate)?;
-    let mut output = Vec::with_capacity(
-        ((input.len() as f64 * TARGET_SAMPLE_RATE as f64 / input_rate as f64).ceil() as usize) + 8,
-    );
-    resampler.process_chunk(input, &mut output)?;
-    resampler.finish(&mut output)?;
-    Ok(Cow::Owned(output))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{resample_to_16k, ResamplerState};
+    use super::{ChunkedResampler, ResamplerState};
     use std::borrow::Cow;
 
     #[test]
-    fn invalid_sample_rate_is_not_reported_as_successful_16k_audio() {
-        let input = [1_i16, -1, 2, -2];
-        let output = resample_to_16k(&input, 0);
+    fn chunked_resampler_rejects_zero_input_rate() {
+        let output = ChunkedResampler::new(0);
 
         assert!(output.is_err());
     }

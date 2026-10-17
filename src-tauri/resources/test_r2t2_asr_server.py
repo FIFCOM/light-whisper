@@ -99,6 +99,26 @@ class R2T2ASRServerAdapterTests(unittest.TestCase):
             "ascii"
         )
 
+    @staticmethod
+    def _hot_word_filter_case():
+        chinese = "中" * 80
+        emoji = "🙂" * 80
+        normalized_boundary = "界" * 39 + " " + "界" * 40
+        return (
+            [
+                " \t\u00a0\u2003\n ",
+                " \tAlpha\u00a0\u2003Beta\n ",
+                "alpha beta",
+                "ALPHA BETA",
+                " " + chinese + " ",
+                "文" * 81,
+                emoji,
+                "🚀" * 81,
+                "界" * 39 + "\t\u2003\n" + "界" * 40,
+            ],
+            ["Alpha Beta", chinese, emoji, normalized_boundary],
+        )
+
     def _assert_success(self, response, *, session_id, text, language, sample_count, final):
         self.assertTrue(response["success"])
         self.assertEqual(response["engine"], "confucius4-r2t2")
@@ -249,6 +269,87 @@ class R2T2ASRServerAdapterTests(unittest.TestCase):
             runtime.feed_inputs[1], np.asarray([32_767 / 32_768], dtype=np.float32)
         )
         self.assertEqual(runtime.feed_inputs[0].dtype, np.dtype(np.float32))
+
+    def test_stream_hot_words_count_boundary_preserves_order(self):
+        for count in (99, 100, 101):
+            with self.subTest(count=count):
+                runtime = FakeStreamRuntime()
+                server = self._server_shell(runtime)
+                words = [f"word-{index}" for index in range(count)]
+
+                result = server.handle_stream_command(
+                    {
+                        "action": "stream_start",
+                        "session_id": 1,
+                        "context": " base ",
+                        "hot_words": words,
+                        "language": " zh ",
+                    }
+                )
+
+                self.assertTrue(result["success"])
+                self.assertEqual(
+                    runtime.start_calls,
+                    [("base\nHotwords: " + ", ".join(words[:100]), "zh")],
+                )
+
+    def test_stream_hot_words_normalize_filter_and_preserve_first_spelling(self):
+        runtime = FakeStreamRuntime()
+        server = self._server_shell(runtime)
+        words, expected = self._hot_word_filter_case()
+
+        result = server.handle_stream_command(
+            {"action": "stream_start", "session_id": 1, "hot_words": words}
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            runtime.start_calls, [("Hotwords: " + ", ".join(expected), None)]
+        )
+
+    def test_invalid_hot_words_preserve_active_stream_after_reaching_limit(self):
+        runtime = FakeStreamRuntime(
+            feed_results=[("ok", "en")], finish_result=("ok", "en")
+        )
+        server = self._server_shell(runtime)
+        self.assertTrue(server.handle_stream_command(
+            {"action": "stream_start", "session_id": 1, "language": "en"}
+        )["success"])
+        invalid_values = [
+            None,
+            "word",
+            ("word",),
+            [f"word-{index}" for index in range(100)] + [None],
+        ]
+
+        for words in invalid_values:
+            with self.subTest(kind=type(words).__name__):
+                self._assert_stream_error(server.handle_stream_command(
+                    {"action": "stream_start", "session_id": 2, "hot_words": words}
+                ))
+
+        self.assertEqual(runtime.start_calls, [("", "en")])
+        self.assertEqual(runtime.reset_calls, 0)
+        feed = server.handle_stream_command(
+            {
+                "action": "stream_feed",
+                "session_id": 1,
+                "offset": 0,
+                "sample_rate": 16_000,
+                "audio_format": "pcm_s16le",
+                "audio_base64": self._pcm16([1, 2]),
+            }
+        )
+        self._assert_success(
+            feed, session_id=1, text="ok", language="en", sample_count=2, final=False
+        )
+        final = server.handle_stream_command(
+            {"action": "stream_finish", "session_id": 1}
+        )
+        self._assert_success(
+            final, session_id=1, text="ok", language="en", sample_count=2, final=True
+        )
+        self.assertEqual(runtime.finish_calls, 1)
 
     def test_malformed_stream_inputs_return_errors_without_mutating_active_stream(self):
         runtime = FakeStreamRuntime(feed_results=[("ok", "en")])
@@ -470,6 +571,96 @@ class R2T2ASRServerAdapterTests(unittest.TestCase):
             {"action": "stream_start", "session_id": 6, "language": "en"}
         )
         self.assertTrue(follow_up["success"])
+
+    def test_offline_hot_words_limit_counts_only_valid_unique_entries(self):
+        words, normalized = self._hot_word_filter_case()
+        for source in ("options", "direct"):
+            for count in (99, 100, 101):
+                with self.subTest(source=source, count=count):
+                    RecordingOfflineSegmented.instances.clear()
+                    server = self._server_shell(FakeStreamRuntime())
+                    fillers = [f"word-{index}" for index in range(count - 4)]
+                    selected = words + fillers
+                    options = {"context": " offline ", "language": " zh "}
+                    direct = {}
+                    if source == "options":
+                        options["hot_words"] = selected
+                    else:
+                        options["hot_words"] = ["ignored-option-word"]
+                        direct["hot_words"] = selected
+
+                    with (
+                        mock.patch.object(
+                            r2t2_asr_server, "SegmentedR2T2", RecordingOfflineSegmented
+                        ),
+                        mock.patch.object(
+                            server,
+                            "_load_audio",
+                            return_value=(np.arange(10, dtype=np.float32), 1.0, "memory"),
+                        ),
+                    ):
+                        result = server.transcribe_audio(None, options=options, **direct)
+
+                    self.assertTrue(result["success"])
+                    self.assertEqual(len(RecordingOfflineSegmented.instances), 1)
+                    segmented = RecordingOfflineSegmented.instances[0]
+                    expected = (normalized + fillers)[:100]
+                    self.assertEqual(
+                        segmented.start_calls,
+                        [("offline\nHotwords: " + ", ".join(expected), "zh")],
+                    )
+                    self.assertEqual(segmented.finish_calls, 1)
+
+    def test_offline_explicit_empty_hot_words_override_options(self):
+        RecordingOfflineSegmented.instances.clear()
+        server = self._server_shell(FakeStreamRuntime())
+        with (
+            mock.patch.object(
+                r2t2_asr_server, "SegmentedR2T2", RecordingOfflineSegmented
+            ),
+            mock.patch.object(
+                server,
+                "_load_audio",
+                return_value=(np.arange(4, dtype=np.float32), 1.0, "memory"),
+            ),
+        ):
+            result = server.transcribe_audio(
+                None,
+                options={
+                    "context": " base ",
+                    "language": " de ",
+                    "hot_words": ["ignored-option-word"],
+                },
+                hot_words=[],
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(RecordingOfflineSegmented.instances), 1)
+        self.assertEqual(RecordingOfflineSegmented.instances[0].start_calls, [("base", "de")])
+        self.assertEqual(RecordingOfflineSegmented.instances[0].finish_calls, 1)
+
+    def test_offline_rejects_invalid_hot_words_even_after_reaching_limit(self):
+        invalid_values = [
+            "word",
+            ("word",),
+            [f"word-{index}" for index in range(100)] + [None],
+        ]
+        for source in ("options", "direct"):
+            for words in invalid_values:
+                with self.subTest(source=source, kind=type(words).__name__):
+                    server = self._server_shell(FakeStreamRuntime())
+                    options = {"hot_words": words} if source == "options" else {}
+                    direct = {"hot_words": words} if source == "direct" else {}
+                    with (
+                        mock.patch.object(r2t2_asr_server, "SegmentedR2T2") as segmented,
+                        mock.patch.object(server, "_load_audio") as load_audio,
+                    ):
+                        result = server.transcribe_audio(None, options=options, **direct)
+
+                    self.assertFalse(result["success"])
+                    self.assertEqual(result["type"], "transcription_error")
+                    segmented.assert_not_called()
+                    load_audio.assert_not_called()
 
     def test_load_runtime_falls_back_to_cpu_and_partial_initialize_closes_native(self):
         class FallbackNative:
