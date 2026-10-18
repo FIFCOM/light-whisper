@@ -76,21 +76,33 @@ index 6b89931..c2ab511 100644
 +    argmax_f32<<<blocks_num, blocks_dim, 0, stream>>>(src0_d, dst_d, ne00, dst->op_params[0] == 1);
  }
 diff --git a/include/audiocpp.h b/include/audiocpp.h
-index 76cfe6b..b3bd786 100644
+index 76cfe6b..a043008 100644
 --- a/include/audiocpp.h
 +++ b/include/audiocpp.h
-@@ -50,9 +50,9 @@ extern "C" {
+@@ -50,16 +50,18 @@ extern "C" {
  /* Versioning                                                          */
  /* ------------------------------------------------------------------ */
  
  #define AUDIOCPP_ABI_VERSION_MAJOR 0
 -#define AUDIOCPP_ABI_VERSION_MINOR 2
-+#define AUDIOCPP_ABI_VERSION_MINOR 4
++#define AUDIOCPP_ABI_VERSION_MINOR 5
  #define AUDIOCPP_ABI_VERSION_PATCH 0
  
  /* Packed as (major << 16) | (minor << 8) | patch. A caller built against a
   * different MAJOR must not use the library. MINOR increments when entry points
-@@ -407,8 +407,12 @@ AUDIOCPP_API audiocpp_status audiocpp_result_audio(const audiocpp_result * resul
+- * are added -- nothing is removed or changed -- so a caller needing a newer one
+- * can require a minimum; PATCH is behaviour only and must not be gated on. See
+- * docs/c_api.md. */
++ * or opt-in option capabilities are added -- nothing is removed or changed --
++ * so a caller needing a newer one can require a minimum. ABI 0.5 adds the
++ * confucius4_r2t2.coalesced_finish session option (default false); callers must
++ * set it before session creation to enable native 320 ms final acoustic context.
++ * PATCH is behaviour only and must not be gated on. See docs/c_api.md. */
+ AUDIOCPP_API uint32_t audiocpp_abi_version(void);
+ 
+ /* audio.cpp's own build version, e.g. "0.2.1". Borrowed, static lifetime. */
+ AUDIOCPP_API const char * audiocpp_build_version(void);
+@@ -407,8 +409,12 @@ AUDIOCPP_API audiocpp_status audiocpp_result_audio(const audiocpp_result * resul
  AUDIOCPP_API audiocpp_status audiocpp_result_text(const audiocpp_result * result,
                                                    const char ** out_text,
                                                    const char ** out_language);
@@ -136,7 +148,7 @@ index 9b56577..ead7bc4 100644
  
  }  // namespace engine::community_models::confucius4_r2t2
 diff --git a/include/engine/community_models/confucius4_r2t2/session.h b/include/engine/community_models/confucius4_r2t2/session.h
-index 1e9d319..9ef4049 100644
+index 1e9d319..340af04 100644
 --- a/include/engine/community_models/confucius4_r2t2/session.h
 +++ b/include/engine/community_models/confucius4_r2t2/session.h
 @@ -10,8 +10,9 @@
@@ -149,17 +161,18 @@ index 1e9d319..9ef4049 100644
  #include <string>
  #include <vector>
  
-@@ -29,8 +30,9 @@ struct R2T2ASRStreamConfig {
+@@ -29,8 +30,10 @@ struct R2T2ASRStreamConfig {
      int64_t unfixed_chunk_num = 2;
      int64_t unfixed_token_num = 5;
      bool rollback_punctuation = false;
      int64_t max_new_tokens = 32;
 +    bool rolling_window = false;
++    bool coalesced_finish = false;
  };
  
  /// Confucius4-R2T2 streaming ASR session.
  ///
-@@ -69,20 +71,29 @@ public:
+@@ -69,20 +72,29 @@ public:
      runtime::TaskResult finish_stream() override;
      runtime::TaskResult finalize() override;
  
@@ -189,7 +202,7 @@ index 1e9d319..9ef4049 100644
  
      runtime::TaskSpec task_;
      std::shared_ptr<const R2T2ASRAssets> assets_;
-@@ -112,8 +123,14 @@ private:
+@@ -112,8 +124,14 @@ private:
      std::vector<float> audio_accum_;
      int64_t chunk_size_samples_ = 0;
      int64_t chunk_id_ = 0;
@@ -291,10 +304,10 @@ index bdc03f2..3a8011c 100644
  struct TimeSpan {
      int64_t start_sample = 0;
 diff --git a/model_specs/confucius4_r2t2.json b/model_specs/confucius4_r2t2.json
-index fdf8b33..42dacda 100644
+index fdf8b33..e6a08f2 100644
 --- a/model_specs/confucius4_r2t2.json
 +++ b/model_specs/confucius4_r2t2.json
-@@ -230,8 +230,15 @@
+@@ -230,8 +230,22 @@
          "required": false,
          "default": 32,
          "description": "Greedy decode budget per streaming chunk and for the final flush (session-scoped; distinct from the offline request max_tokens)."
@@ -305,6 +318,13 @@ index fdf8b33..42dacda 100644
 +        "required": false,
 +        "default": false,
 +        "description": "Use a bounded 16-second rolling audio window with append-only committed transcript state."
++      },
++      {
++        "name": "coalesced_finish",
++        "type": "bool",
++        "required": false,
++        "default": false,
++        "description": "Append 320 ms of zero acoustic context to nonempty streaming audio and decode it once in the final flush."
 +      },
        {
          "name": "audio_encoder_weight_type",
@@ -416,10 +436,20 @@ index e1b670e..c637b8b 100644
      R2T2ASRAudioFeatures out;
      out.values = std::move(features.values);
 diff --git a/src/community_models/confucius4_r2t2/session.cpp b/src/community_models/confucius4_r2t2/session.cpp
-index 68853c0..adc4f4e 100644
+index 68853c0..e640c21 100644
 --- a/src/community_models/confucius4_r2t2/session.cpp
 +++ b/src/community_models/confucius4_r2t2/session.cpp
-@@ -124,8 +124,11 @@ R2T2ASRSession::R2T2ASRSession(
+@@ -8,8 +8,9 @@
+ 
+ #include <algorithm>
+ #include <chrono>
+ #include <cmath>
++#include <limits>
+ #include <sstream>
+ #include <stdexcept>
+ #include <utility>
+ 
+@@ -124,8 +125,14 @@ R2T2ASRSession::R2T2ASRSession(
      }
      if (const auto value = runtime::parse_int_option(options.options, {"confucius4_r2t2.max_tokens"})) {
          stream_config_.max_new_tokens = *value;
@@ -427,23 +457,27 @@ index 68853c0..adc4f4e 100644
 +    if (const auto value = runtime::find_option(options.options, {"confucius4_r2t2.rolling_window"})) {
 +        stream_config_.rolling_window = runtime::parse_bool_option(*value, "confucius4_r2t2.rolling_window");
 +    }
++    if (const auto value = runtime::find_option(options.options, {"confucius4_r2t2.coalesced_finish"})) {
++        stream_config_.coalesced_finish = runtime::parse_bool_option(*value, "confucius4_r2t2.coalesced_finish");
++    }
      if (stream_config_.chunk_seconds <= 0.0) {
          throw std::runtime_error("confucius4_r2t2.chunk_size_ms must be positive");
      }
      if (stream_config_.unfixed_chunk_num < 0 || stream_config_.unfixed_token_num < 0) {
-@@ -147,9 +150,10 @@ R2T2ASRSession::R2T2ASRSession(
+@@ -147,9 +154,11 @@ R2T2ASRSession::R2T2ASRSession(
              key != "confucius4_r2t2.chunk_size_ms" &&
              key != "confucius4_r2t2.unfixed_chunk_num" &&
              key != "confucius4_r2t2.unfixed_token_num" &&
              key != "confucius4_r2t2.rollback_punctuation" &&
 -            key != "confucius4_r2t2.max_tokens") {
 +            key != "confucius4_r2t2.max_tokens" &&
-+            key != "confucius4_r2t2.rolling_window") {
++            key != "confucius4_r2t2.rolling_window" &&
++            key != "confucius4_r2t2.coalesced_finish") {
              throw std::runtime_error("unknown R2T2 ASR session option: " + key);
          }
      }
      assets_->model_weights->release_storage();
-@@ -306,8 +310,12 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
+@@ -306,8 +315,12 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
          return {};
      }
      const std::string raw_truncated = truncate_at_pipe(raw_decoded_);
@@ -456,7 +490,7 @@ index 68853c0..adc4f4e 100644
          // finish_streaming_transcribe uses a fixed rollback without the
          // replacement-character loop and never rolls back past the first token.
          const int64_t end_index = std::max<int64_t>(1, static_cast<int64_t>(ids.size()) - stream_config_.unfixed_token_num);
-@@ -319,9 +327,72 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
+@@ -319,9 +332,72 @@ std::string R2T2ASRSession::build_stream_prefix(bool final_flush) const {
      }
      return truncate_at_pipe(decode_rollback_prefix(ids, k));
  }
@@ -529,7 +563,7 @@ index 68853c0..adc4f4e 100644
      const std::string prefix = build_stream_prefix(final_flush);
  
      runtime::AudioBuffer accum;
-@@ -388,8 +459,9 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
+@@ -388,8 +464,9 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
      language_ = parsed.language;
      text_ = truncate_at_pipe(parsed.text);
      ++chunk_id_;
@@ -539,7 +573,7 @@ index 68853c0..adc4f4e 100644
      debug::trace_log_scalar("confucius4_r2t2.stream.final_flush", final_flush ? 1 : 0);
      debug::trace_log_scalar("confucius4_r2t2.stream.chunk_id", chunk_id_);
      debug::trace_log_scalar("confucius4_r2t2.stream.raw_decoded", raw_decoded_);
-@@ -397,8 +469,162 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
+@@ -397,8 +474,162 @@ R2T2ASRSession::StreamOutcome R2T2ASRSession::decode_stream_chunk(bool final_flu
      debug::trace_log_scalar("confucius4_r2t2.stream.text", text_);
      return outcome;
  }
@@ -702,7 +736,7 @@ index 68853c0..adc4f4e 100644
      // fixed_text contains transcript text only; metadata must never advance
      // this code-point offset. Stable transcript prefixes may still shrink
      // between chunks, so only publish newly committed code points.
-@@ -468,8 +694,14 @@ void R2T2ASRSession::reset() {
+@@ -468,8 +699,14 @@ void R2T2ASRSession::reset() {
      audio_accum_.clear();
      chunk_size_samples_ = 0;
      chunk_id_ = 0;
@@ -717,7 +751,7 @@ index 68853c0..adc4f4e 100644
      stream_channels_ = 1;
      stream_started_ = false;
      stream_wall_start_ = {};
-@@ -504,15 +736,35 @@ runtime::StreamEvent R2T2ASRSession::process_audio_chunk(const runtime::AudioChu
+@@ -504,15 +741,35 @@ runtime::StreamEvent R2T2ASRSession::process_audio_chunk(const runtime::AudioChu
      runtime::StreamEvent event;
      event.is_final = false;
      const size_t channel_stride = static_cast<size_t>(chunk.channels);
@@ -754,17 +788,32 @@ index 68853c0..adc4f4e 100644
              streaming_result_.text_output = runtime::Transcript{outcome.text, language_};
          } else {
              streaming_result_.text_output->text = outcome.text;
-@@ -545,8 +797,15 @@ runtime::TaskResult R2T2ASRSession::finalize() {
+@@ -544,9 +801,30 @@ runtime::TaskResult R2T2ASRSession::finalize() {
+     }
      if (!stream_started_) {
          throw std::runtime_error("R2T2 ASR finalize() requires start_stream");
      }
++    if (stream_config_.coalesced_finish && (!audio_accum_.empty() || !buffer_.empty())) {
++        // Keep all final acoustic context in the one existing final decode.
++        const size_t channel_stride = static_cast<size_t>(stream_channels_);
++        const size_t context_frames = static_cast<size_t>(
++            static_cast<uint64_t>(stream_sample_rate_) * 320 / 1000);
++        if (context_frames > (buffer_.max_size() - buffer_.size()) / channel_stride) {
++            throw std::runtime_error("R2T2 ASR final acoustic context exceeds buffer capacity");
++        }
++        buffer_.resize(buffer_.size() + context_frames * channel_stride, 0.0f);
++    }
      if (!buffer_.empty()) {
 +        if (stream_config_.rolling_window) {
 +            const size_t channel_stride = static_cast<size_t>(std::max(stream_channels_, 1));
 +            if (buffer_.size() % channel_stride != 0) {
 +                throw std::runtime_error("R2T2 rolling stream tail frame accounting mismatch");
 +            }
-+            total_decoded_frames_ += buffer_.size() / channel_stride;
++            const size_t tail_frames = buffer_.size() / channel_stride;
++            if (tail_frames > std::numeric_limits<size_t>::max() - total_decoded_frames_) {
++                throw std::runtime_error("R2T2 rolling stream tail frame count overflow");
++            }
++            total_decoded_frames_ += tail_frames;
 +        }
          audio_accum_.insert(audio_accum_.end(), buffer_.begin(), buffer_.end());
          buffer_.clear();

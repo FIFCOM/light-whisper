@@ -32,12 +32,13 @@ in [R2T2-MODEL-LICENSE.txt](../src-tauri/resources/R2T2-MODEL-LICENSE.txt).
 - Profiles retain at most 300 hotwords; ASR selects at most 100 by weight and usage. The Python request boundary also keeps at most 100 unique hotwords, normalizes whitespace and ignores case when deduplicating. Empty entries and entries longer than 80 Unicode characters are skipped without shortening words. Streaming and offline requests use the same normalization.
 - VAD retains its trailing audio window but skips inference while an active segment is too short to end. Native captions render directly, without running an unused character-reveal animation.
 - Stop flushes 320 ms of acoustic silence inside the native decoder before collecting the final result. This is inference input, with no timer or extra microphone recording. Paired CUDA checks recovered the missing Chinese tails “带” and “喝” and English sentence tails; 80/160 ms remained insufficient on the Chinese clips. Captured sample counts and the live-feed schedule are unchanged; ending a segment adds bounded decoder work. The opt-in Rust test `real_native_stop_before_caption_refresh_keeps_sentence_tail` covers immediate Stop through the actual server and checks sample accounting.
+- With native ABI 0.5+, CUDA rolling sessions append that complete context to the pending audio and decode it once in the final flush. The adapter enables `confucius4_r2t2.coalesced_finish` before session creation; the native option defaults to false. ABI 0.3/0.4, CPU, Qwen and nonrolling sessions retain their previous finish path. Empty recordings add no context.
 
 ## Build and packaging
 
 Follow [Development](development.md) to build the two native packages and the installer. Native builds require Visual Studio 2022 C++ tools, CMake and Ninja; CUDA builds were validated with CUDA 12.9 and MSVC 14.44.
 
-The build pins audio.cpp revision `6c70f32d0d90a29a9863e556bd9712ce622f868b` and requires an exact match to `scripts/patches/audio-cpp-r2t2-windows-streaming.patch`. Build `light-whisper-asr-8` writes libraries, licenses and SHA-256 manifests to ignored `src-tauri/resources/r2t2-native/{cpu,cuda}/`. CUDA targets architectures 75, 80, 86, 89 and 90.
+The build pins audio.cpp revision `6c70f32d0d90a29a9863e556bd9712ce622f868b` and requires an exact match to `scripts/patches/audio-cpp-r2t2-windows-streaming.patch`. Build `light-whisper-asr-9` writes libraries, licenses and SHA-256 manifests to ignored `src-tauri/resources/r2t2-native/{cpu,cuda}/`. CUDA targets architectures 75, 80, 86, 89 and 90.
 
 The engine builder validates both manifests and shares byte-identical CUDA/CRT DLLs in `_internal` when a root copy exists. Otherwise, dependencies stay beside the native library. Shared files are listed in each copied manifest. Standalone native packages retain their dependencies. Only CPU/CUDA native directories enter the engine; copied legacy Vulkan DLLs are removed before compression, and reused archives containing Vulkan libraries or retired transcribe.cpp packages are rejected. Model weights are not bundled.
 
@@ -132,6 +133,22 @@ Two Qwen encoder reuse experiments were discarded. Padded-token capacity graphs 
 
 The final rebuilt engines were compared in old/new/new/old process order with one offline warmup and three paced 16-second replays per process. All twelve measured replays accepted the same 256,013 samples and PCM hash, preserving exact final text and language. First-caption median was 764.5 / 762.7 ms; finish-request median was 225.4 / 224.7 ms. The median of per-run changed-caption-gap p95 was 772.8 / 783.9 ms. All median/p95 guard ratios remained below 1.05. These small differences do not establish a whole-subtitle speedup; this Python stdio driver does not measure Rust microphone capture or desktop rendering.
 
+### R2T2 final acoustic context
+
+Build `light-whisper-asr-9` combines the pending real tail and the complete 320 ms acoustic context in one final decode for CUDA rolling sessions. Models, precision, rolling windows and live feed boundaries are unchanged.
+
+On the same RTX 4070 SUPER, separate resident-model processes ran two rounds in ABBA/BAAB order, with one warmup per case and three measured sweeps per process. Each variant has twelve measured recordings per case. The interval below is `NativeRuntime.finish`; model loading, microphone capture, VAD, IPC and AI polish are outside it.
+
+| Recording | Previous finish median | Combined finish median | Reduction |
+|:--|--:|--:|--:|
+| Chinese, 4.20 s | 85.90 ms | 30.42 ms | 64.6% |
+| English, 10.56 s | 82.04 ms | 38.64 ms | 52.9% |
+| Repeated Chinese, 36 s | 139.50 ms | 67.74 ms | 51.4% |
+
+Both rounds and the aggregate passed the declared 10% finish target for the two original clips, with no greater-than-5% regression in first-caption compute time, feed p95 or finish p95. All 96 warmup/measured streams preserved exact committed, preview and final text, language and sample traces, and all eight processes closed normally. The final DLL also passes the thirteen-case, 508-feed base regression. A separate eight-case comparison preserves 729 feed responses across forced languages, context hints, mixed speech, rolling tails and real product VAD segmentation. Additional natural 31.12-second and FLEURS 10.38-second Chinese clips retain exact live/final text, language and sample traces across 260 feeds. CPU R2T2 output, cancellation, reset and captured counts match the preceding CPU package; CPU Qwen text and language also match. These public-fixture checks are limited regression evidence, not a broad CER/WER evaluation.
+
+Rebuilt packaged engines were then replayed in old/new/new/old process order, with one offline warmup and three paced 16-second streams plus a thirteen-sample tail per process. All twelve measured streams retained exact final text, language, 256,013 captured samples and the accepted PCM hash, and every child exited normally. Median finish-request latency including VAD and stdio IPC fell from 201.95 to 73.29 ms; simulated audio-stop-to-final latency fell from 269.59 to 138.63 ms (48.6%). First-caption median was 1,023.64 / 1,029.34 ms. This driver exercises the packaged Python server and scheduling policy; it does not measure Rust microphone capture, desktop rendering or AI polish.
+
 ## Reproduce checks
 
 `scripts/benchmark_r2t2_startup.py` takes explicit model, library, dependency-directory and PCM16 WAV paths. Save a baseline with `--output baseline.json`, then test a candidate with `--baseline baseline.json`. It compares committed traces and final text, including silence, resets and short recordings. `--max-first-audio-seconds` checks audio position, excluding compute time.
@@ -145,6 +162,8 @@ python scripts/test_r2t2_frontend_cache.py --source build/r2t2/source --build-di
 `scripts/benchmark_r2t2_frontend.py` builds the real frontend without FFT mocks. Pass `--source`, `--build-dir` and a mono 16 kHz `--wav`. Build baseline and candidate separately with `--build-only`, then measure preserved executables with `--no-build` in ABBA order while other compilation and inference are idle.
 
 `scripts/test_r2t2_native_cache.py` captures or checks complete CUDA streaming traces. Pass `--model`, `--library`, `--dependencies`, `--zh-wav`, `--en-wav` and a fresh `--output`; use `--reference baseline.json` to compare a candidate. It keeps the original finish padding and verifies exact audio accounting, including non-hop final appends.
+
+`scripts/benchmark_r2t2_finish.py` compares preserved baseline and candidate wrapper directories and DLLs in separate sequential workers. Pass `--baseline-source-dir`, `--candidate-source-dir`, `--baseline-library`, `--candidate-library`, `--model`, `--dependencies`, `--reference`, `--zh-wav`, `--en-wav` and a fresh `--output-dir`. Defaults run two ABBA/BAAB rounds, one warmup per case and three measured sweeps per process. Exact live/final text, language and sample traces must match before timing is considered; native cleanup failures reject the worker. Keep other compilation and inference idle. `--self-test` checks the measurement guards without loading a model.
 
 After building the native CPU runtime, extract the unmodified pinned runtime from its Git history and run the chunked-prefill unit check (MSVC required; no model or GPU):
 

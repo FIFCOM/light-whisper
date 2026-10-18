@@ -48,6 +48,7 @@ class NativeRuntime:
         self._preview_text = ''
         self._language = None
         self._offset = 0
+        self._coalesced_finish = False
         library_path = Path(library_path).resolve()
         self.lib = None
         self.functions = {}
@@ -57,6 +58,13 @@ class NativeRuntime:
                     self._dll_paths.append(os.add_dll_directory(str(directory.resolve())))
             self.lib = ct.CDLL(str(library_path))
             self._bind()
+            coalesced_finish = (
+                getattr(self, '_supports_coalesced_finish', False)
+                and family == 'confucius4_r2t2'
+                and backend == 'cuda'
+                and rolling
+                and mode == 'streaming'
+            )
             self._call('registry_create', None, ct.byref(self.registry))
             config = _ModelConfig(family.encode('utf-8'), None, None, None)
             self._call('model_load', self.registry, str(Path(model_path).resolve()).encode('utf-8'),
@@ -73,9 +81,12 @@ class NativeRuntime:
                         # Commit sentence endings using R2T2's native policy, so a
                         # completed suffix is not kept behind rollback at a roll.
                         self._call('options_set', options, b'confucius4_r2t2.rollback_punctuation', b'true')
+                    if coalesced_finish:
+                        self._call('options_set', options, b'confucius4_r2t2.coalesced_finish', b'true')
                 self._call('session_create', self.model, b'asr', mode.encode('utf-8'),
                            ct.byref(_BackendConfig(backend.encode(), 0, threads)), options,
                            ct.byref(self.session))
+                self._coalesced_finish = coalesced_finish
             finally:
                 self.functions['options_free'](options)
         except BaseException:
@@ -94,6 +105,7 @@ class NativeRuntime:
             and self.rolling
             and (abi >> 8) & 0xff >= 4
         )
+        self._supports_coalesced_finish = (abi >> 8) & 0xff >= 5
         signatures = {
             'abi_version': (ct.c_uint32, []),
             'last_error': (S, []),
@@ -211,7 +223,8 @@ class NativeRuntime:
     def finish(self):
         if not self._active:
             raise RuntimeError('No active R2T2 stream')
-        if self._offset:
+        coalesced_finish = getattr(self, '_coalesced_finish', False)
+        if self._offset and not coalesced_finish:
             # Decode the last spoken word without waiting for more microphone
             # packets. This context stays inside the native runtime; captured
             # sample counts, durations and live captions remain unchanged.
@@ -220,6 +233,8 @@ class NativeRuntime:
         try:
             self._call('stream_finish', self.session, ct.byref(result))
             text, language = self._read_text(result)
+            if self._offset and coalesced_finish:
+                self._offset += self.FINISH_CONTEXT_SAMPLES
             self._active = False
             self._preview_text = ''
             return text, language or self._language
