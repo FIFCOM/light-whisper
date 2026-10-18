@@ -268,16 +268,6 @@ pub fn screen_vision_endpoint_for_config(config: &LlmProviderConfig) -> Option<L
     Some(endpoint_for_provider(config, &provider, Some(model)))
 }
 
-pub fn known_image_input_support(endpoint: &LlmEndpoint) -> Option<bool> {
-    // DeepSeek's official V4 Flash/Pro text endpoints do not accept image input.
-    // Keep this provider-scoped so a custom multimodal gateway with a similar
-    // model name can still be probed or tried normally.
-    if endpoint.provider == DEEPSEEK {
-        return Some(false);
-    }
-    None
-}
-
 pub fn image_support_probe_url(endpoint: &LlmEndpoint) -> Option<String> {
     if endpoint.api_format != ApiFormat::OpenaiCompat {
         return None;
@@ -290,7 +280,9 @@ pub fn image_support_probe_url(endpoint: &LlmEndpoint) -> Option<String> {
 
     let models_url = normalize_models_url(Some(&endpoint.api_url), &endpoint.api_url);
     let mut url = reqwest::Url::parse(&models_url).ok()?;
-    {
+    // DeepSeek publishes model capabilities through its model list endpoint.
+    // https://api-docs.deepseek.com/api/list-models/
+    if endpoint.provider != DEEPSEEK {
         let mut segments = url.path_segments_mut().ok()?;
         segments.pop_if_empty();
         segments.push(model);
@@ -363,9 +355,6 @@ pub async fn probe_image_support_from_provider_metadata(
     endpoint: &LlmEndpoint,
     api_key: &str,
 ) -> Option<bool> {
-    if let Some(supported) = known_image_input_support(endpoint) {
-        return Some(supported);
-    }
     if codex_oauth_service::decode_chatgpt_bearer_token(api_key).is_some() {
         return None;
     }
@@ -418,7 +407,23 @@ pub async fn probe_image_support_from_provider_metadata(
             }
         };
 
-        if let Some(supported) = parse_image_input_support_from_model_metadata(&payload) {
+        let metadata = if endpoint.provider == DEEPSEEK {
+            let Some(model) = payload
+                .get("data")
+                .and_then(Value::as_array)
+                .and_then(|models| {
+                    models.iter().find(|model| {
+                        model.get("id").and_then(Value::as_str) == Some(endpoint.model.trim())
+                    })
+                })
+            else {
+                continue;
+            };
+            model
+        } else {
+            &payload
+        };
+        if let Some(supported) = parse_image_input_support_from_model_metadata(metadata) {
             return Some(supported);
         }
     }
@@ -2714,22 +2719,221 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
     }
 
+    async fn probe_mock_image_metadata(
+        provider: &str,
+        model: &str,
+        responses: Vec<(u16, String)>,
+    ) -> (Vec<Option<bool>>, Vec<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("metadata server should bind");
+        let address = listener.local_addr().expect("metadata server address");
+        let response_count = responses.len();
+        let mut server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.expect("metadata request");
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 1024];
+                    let count = socket
+                        .read(&mut chunk)
+                        .await
+                        .expect("read metadata request");
+                    assert!(count > 0, "metadata request must include complete headers");
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8(request).expect("HTTP request headers"));
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write metadata response");
+            }
+            requests
+        });
+        let mut endpoint =
+            endpoint_for_preview(provider, None, Some(model), ApiFormat::OpenaiCompat);
+        endpoint.api_url = format!("http://{address}/v1/chat/completions");
+        endpoint.model = model.to_string();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("local metadata client");
+        let mut support = Vec::new();
+        for _ in 0..response_count {
+            support.push(
+                probe_image_support_from_provider_metadata(
+                    &client,
+                    &endpoint,
+                    "FAKE_METADATA_TEST_KEY",
+                )
+                .await,
+            );
+        }
+        let requests =
+            match tokio::time::timeout(std::time::Duration::from_secs(1), &mut server).await {
+                Ok(result) => result.expect("metadata server should complete"),
+                Err(_) => {
+                    server.abort();
+                    let _ = server.await;
+                    Vec::new()
+                }
+            };
+        (support, requests)
+    }
+
+    fn assert_image_metadata_requests(requests: &[String], path: &str, count: usize) {
+        assert_eq!(
+            requests.len(),
+            count,
+            "each probe must read upstream metadata"
+        );
+        for request in requests {
+            assert_eq!(
+                request.lines().next(),
+                Some(format!("GET {path} HTTP/1.1").as_str())
+            );
+            let authorization = request.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("authorization")
+                    .then(|| value.trim())
+            });
+            assert_eq!(authorization, Some("Bearer FAKE_METADATA_TEST_KEY"));
+        }
+    }
+
+    #[tokio::test]
+    async fn deepseek_image_support_follows_metadata_for_legacy_current_and_future_models() {
+        for (model, modality) in [
+            ("deepseek-flash", "image"),
+            ("deepseek-chat", "image"),
+            ("deepseek-v4-pro", "input_image"),
+            ("deepseek-future-vision", "image"),
+        ] {
+            let payload = serde_json::json!({
+                "data": [{"id": model, "input_modalities": ["text", modality]}]
+            });
+            let (support, requests) =
+                probe_mock_image_metadata(DEEPSEEK, model, vec![(200, payload.to_string())]).await;
+
+            assert_eq!(support, vec![Some(true)], "model={model}");
+            assert_image_metadata_requests(&requests, "/v1/models", 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn deepseek_image_support_selects_exact_model_and_follows_upstream_changes() {
+        let responses = [
+            serde_json::json!({"data": [
+                {"id": "deepseek-v4-pro-preview", "input_modalities": ["text", "image"]},
+                {"id": "deepseek-v4-pro", "input_modalities": ["text"]}
+            ]}),
+            serde_json::json!({"data": [
+                {"id": "deepseek-v4-pro-preview", "input_modalities": ["text"]},
+                {"id": "deepseek-v4-pro", "input_modalities": ["text", "image"]}
+            ]}),
+        ];
+        let (support, requests) = probe_mock_image_metadata(
+            DEEPSEEK,
+            " deepseek-v4-pro ",
+            responses
+                .into_iter()
+                .map(|payload| (200, payload.to_string()))
+                .collect(),
+        )
+        .await;
+
+        assert_eq!(support, vec![Some(false), Some(true)]);
+        assert_image_metadata_requests(&requests, "/v1/models", 2);
+    }
+
+    #[tokio::test]
+    async fn deepseek_image_support_keeps_unknown_metadata_and_http_errors_unknown() {
+        let model = "deepseek-v4-pro";
+        let mut responses = [
+            serde_json::json!({"data": [{"id": "another-model", "input_modalities": ["image"]}]}),
+            serde_json::json!({"data": [{"id": model}]}),
+            serde_json::json!({"data": [{"id": model, "input_modalities": []}]}),
+            serde_json::json!({"data": [{"id": model, "input_modalities": "image"}]}),
+            serde_json::json!({"data": [{"id": model, "input_modalities": ["audio"]}]}),
+            serde_json::json!({"id": model, "input_modalities": ["image"]}),
+        ]
+        .into_iter()
+        .map(|payload| (200, payload.to_string()))
+        .collect::<Vec<_>>();
+        responses.push((200, "not valid JSON".to_string()));
+        responses.push((
+            503,
+            serde_json::json!({"data": [{"id": model, "input_modalities": ["image"]}]}).to_string(),
+        ));
+        let response_count = responses.len();
+        let (support, requests) = probe_mock_image_metadata(DEEPSEEK, model, responses).await;
+
+        assert_eq!(support, vec![None; response_count]);
+        assert_image_metadata_requests(&requests, "/v1/models", response_count);
+    }
+
     #[test]
-    fn official_deepseek_is_known_to_be_text_only() {
-        let official = endpoint_for_preview(
+    fn deepseek_image_support_canonical_flash_body_preserves_responses_image_content() {
+        use crate::services::llm_client::{
+            build_llm_body, LlmImageInput, LlmRequestOptions, LlmUserInput,
+        };
+
+        let endpoint = endpoint_for_preview(
             DEEPSEEK,
             None,
-            Some("deepseek-v4-pro"),
+            Some("deepseek-flash"),
             ApiFormat::OpenaiCompat,
         );
-        let custom = endpoint_for_preview(
-            CUSTOM,
-            Some("https://example.com/v1"),
-            Some("deepseek-v4-pro"),
-            ApiFormat::OpenaiCompat,
-        );
+        let image_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=";
+        let input = LlmUserInput {
+            text: "Describe the synthetic image".to_string(),
+            images: vec![LlmImageInput {
+                mime_type: "image/png".to_string(),
+                data_base64: image_base64.to_string(),
+            }],
+        };
+        let body = build_llm_body(&endpoint, "system", &input, LlmRequestOptions::default());
+        let user = body["input"]
+            .as_array()
+            .expect("Responses request input")
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("Responses user message");
+        let image = user["content"]
+            .as_array()
+            .expect("Responses user content")
+            .iter()
+            .find(|item| item["type"] == "input_image")
+            .expect("Responses image input");
 
-        assert_eq!(known_image_input_support(&official), Some(false));
-        assert_eq!(known_image_input_support(&custom), None);
+        assert_eq!(
+            image["image_url"],
+            format!("data:image/png;base64,{image_base64}")
+        );
+        assert!(body.get("messages").is_none());
+    }
+
+    #[tokio::test]
+    async fn custom_image_support_retains_model_detail_probe() {
+        let payload = serde_json::json!({
+            "id": "deepseek-v4-pro",
+            "input_modalities": ["text", "image"]
+        });
+        let (support, requests) =
+            probe_mock_image_metadata(CUSTOM, "deepseek-v4-pro", vec![(200, payload.to_string())])
+                .await;
+
+        assert_eq!(support, vec![Some(true)]);
+        assert_image_metadata_requests(&requests, "/v1/models/deepseek-v4-pro", 1);
     }
 }

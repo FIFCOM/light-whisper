@@ -24,6 +24,11 @@ DeepSeek's canonical Flash ID currently resolves to DeepSeek-V4.1-Flash-1017.
 legacy Chat-only model selections and custom gateways keep their original route.
 The shared request builder selects the effective DeepSeek protocol for polishing,
 assistant, selection and validation requests.
+Image capability follows the selected model's upstream `input_modalities`, rather
+than a provider-wide assumption. DeepSeek's authenticated `/v1/models` list is
+matched by exact model ID; failed or inconclusive metadata queries remain unknown
+and retain the existing image-request fallback. See [model metadata](https://api-docs.deepseek.com/api/list-models/)
+and [image input](https://api-docs.deepseek.com/guides/vision/).
 The [Responses compatibility guide](https://api-docs.deepseek.com/guides/responses_api/)
 currently supports native `web_search` with Pro and ignores that tool with Flash;
 protocol regression tests do not establish upstream search availability.
