@@ -38,7 +38,7 @@ in [R2T2-MODEL-LICENSE.txt](../src-tauri/resources/R2T2-MODEL-LICENSE.txt).
 
 Follow [Development](development.md) to build the two native packages and the installer. Native builds require Visual Studio 2022 C++ tools, CMake and Ninja; CUDA builds were validated with CUDA 12.9 and MSVC 14.44.
 
-The build pins audio.cpp revision `6c70f32d0d90a29a9863e556bd9712ce622f868b` and requires an exact match to `scripts/patches/audio-cpp-r2t2-windows-streaming.patch`. Build `light-whisper-asr-9` writes libraries, licenses and SHA-256 manifests to ignored `src-tauri/resources/r2t2-native/{cpu,cuda}/`. CUDA targets architectures 75, 80, 86, 89 and 90.
+The build pins audio.cpp revision `6c70f32d0d90a29a9863e556bd9712ce622f868b` and requires an exact match to `scripts/patches/audio-cpp-r2t2-windows-streaming.patch`. Build `light-whisper-asr-10` writes libraries, licenses and SHA-256 manifests to ignored `src-tauri/resources/r2t2-native/{cpu,cuda}/`. CUDA targets architectures 75, 80, 86, 89 and 90.
 
 The engine builder validates both manifests and shares byte-identical CUDA/CRT DLLs in `_internal` when a root copy exists. Otherwise, dependencies stay beside the native library. Shared files are listed in each copied manifest. Standalone native packages retain their dependencies. Only CPU/CUDA native directories enter the engine; copied legacy Vulkan DLLs are removed before compression, and reused archives containing Vulkan libraries or retired transcribe.cpp packages are rejected. Model weights are not bundled.
 
@@ -149,6 +149,28 @@ Both rounds and the aggregate passed the declared 10% finish target for the two 
 
 Rebuilt packaged engines were then replayed in old/new/new/old process order, with one offline warmup and three paced 16-second streams plus a thirteen-sample tail per process. All twelve measured streams retained exact final text, language, 256,013 captured samples and the accepted PCM hash, and every child exited normally. Median finish-request latency including VAD and stdio IPC fell from 201.95 to 73.29 ms; simulated audio-stop-to-final latency fell from 269.59 to 138.63 ms (48.6%). First-caption median was 1,023.64 / 1,029.34 ms. This driver exercises the packaged Python server and scheduling policy; it does not measure Rust microphone capture, desktop rendering or AI polish.
 
+### Exact streaming prefill prefix reuse
+
+Build `light-whisper-asr-10` queues the four prefill input uploads on the backend stream and reuses complete prefill blocks whose input embeddings are byte-identical to the previous prompt. Reuse requires the same graph shape and sufficient cache capacity; the final block always recomputes. Unused future KV rows are zeroed, including potentially non-finite old values. Alternate prefill/import APIs, failed prefills and graph release invalidate the saved prompt. Models, precision and audio feed boundaries stay unchanged.
+
+The prefix experiment compares against the same queued-upload implementation on an RTX 4070 SUPER. Eight sequential resident-model processes in ABBA/BAAB order supply twelve measured recordings per variant/case, plus warmups. All 96 streams retain exact live/final text, language and sample traces. Groups with user-confirmed concurrent GPU use were excluded from timing. The retained clean comparison measures accumulated native start/feed/finish processing time, excluding recording duration, model loading, AI polish, VAD, IPC and UI rendering:
+
+| Recording | Queued uploads | With exact prefix reuse | Reduction |
+|:--|--:|--:|--:|
+| Chinese, 4.20 s | 1,381.82 ms | 1,316.42 ms | 4.7% |
+| English, 10.56 s | 3,609.32 ms | 3,397.21 ms | 5.9% |
+| Repeated Chinese, 36 s | 13,796.94 ms | 12,382.93 ms | 10.2% |
+
+Both orders favor the candidate in all three cases. The short Chinese effect varies by round and precedes any reusable block in the inspected long-stream diagnostic, so its full timing change cannot be attributed to avoided prefill alone. A separate four-process identical-DLL short-case control has a 0.013% aggregate difference. First-caption audio positions remain 15,360 samples for Chinese and 28,160 for English. The logged 36-second stream avoids 167 complete 64-token prefill blocks. CPU regressions preserve all numerical traces and greedy continuations; the prefix work slice executes 97 graphs versus 128 before reuse. These checks do not establish broad CER/WER coverage or a theoretical latency limit, and no preset speed percentage determines retention.
+
+### Reuse before global log-mel normalization
+
+The asr10 frontend also caches raw log-mel energies instead of complete STFT magnitudes. Exact normalized-PCM prefixes reuse only columns whose FFT windows are stable, capped by the previous log-mel output count because the final STFT column is discarded. Changed or right-reflected columns recompute; identical PCM performs no FFT or mel transform. Every result still applies the global maximum, floor and normalization across all columns, so a louder append can change historical normalized features correctly. Peak renormalization, rewritten audio and rolling-window shifts invalidate reuse.
+
+The real CPU regression covers 141 observations across three FFT/hop/mel configurations, with a 4,861,231-byte feature/mask/shape trace identical to the frozen previous frontend. Interposition counts the actual unchanged sparse-mel arithmetic and FFT work; the previous implementation fails 63 work checks while the candidate passes all. The original 47-observation frontend regression also passes. On the same 225-extraction, repeated 36-second PCM replay, eight preserved-executable processes in ABBA/BAAB order produce 24 measured replays per variant. Median CPU frontend time falls from 320.405 to 161.996 ms; round ratios are 0.507 and 0.508. This 49.4% reduction applies to the CPU frontend stage.
+
+An additional eight-process ABBA/BAAB CUDA comparison isolates this frontend change against retained prefix reuse. All 96 streams match the reference exactly. Total native processing medians are 1,324.96 / 1,326.17 ms for Chinese, 3,416.75 / 3,379.67 ms for English, and 12,044.69 / 11,981.90 ms for repeated 36-second Chinese. Short Chinese is effectively flat; English reverses direction between rounds. Long-stream round ratios are 0.980 and 0.999, with a 0.52% aggregate reduction. These small differences do not establish uniform whole-ASR acceleration. The repeated CPU-stage gain is retained; no repeatable whole-native latency regression was observed. Real CUDA 13-case/508-feed traces, eight forced-language/mixed/VAD scenarios with 729 feeds, and CPU R2T2/Qwen public outputs remain exact. First-caption audio positions are unchanged. Per-round first-caption accumulated-compute ratios are 1.000/0.983 for English and 0.996/0.986 for the long Chinese replay. Short Chinese adds 1.24/0.65 ms per round; this small effect remains unresolved with the available independent process blocks. These unpaced measurements do not establish unchanged microphone-to-screen latency.
+
 ## Reproduce checks
 
 `scripts/benchmark_r2t2_startup.py` takes explicit model, library, dependency-directory and PCM16 WAV paths. Save a baseline with `--output baseline.json`, then test a candidate with `--baseline baseline.json`. It compares committed traces and final text, including silence, resets and short recordings. `--max-first-audio-seconds` checks audio position, excluding compute time.
@@ -172,7 +194,17 @@ python -c "from pathlib import Path; import subprocess; Path('build/r2t2/prefill
 python scripts/test_r2t2_prefill.py --source build/r2t2/source --libraries build/r2t2/cpu --baseline build/r2t2/prefill-baseline.cpp --build-dir build/native-tests/r2t2-prefill
 ```
 
-For real-model timing, `scripts/benchmark_r2t2_prefill.py` takes `--baseline-library`, `--candidate-library`, `--model`, `--dependencies`, `--reference`, `--zh-wav`, `--en-wav` and a new `--output-dir`. Use the frozen 13-scenario/508-push reference from `test_r2t2_native_cache.py`, `--rounds 2 --repeats 2 --order ABBA`, and idle other compilation/inference. It preloads the same CUDA dependencies in separate resident-model workers, alternates ABBA/BAAB order, checks every replay against the reference and saves raw timings, hashes and GPU snapshots. Independent process blocks and complete recordings are the repeated measurements; individual feeds are correlated.
+For real-model timing, `scripts/benchmark_r2t2_prefill.py` takes `--baseline-library`, `--candidate-library`, `--model`, `--dependencies`, `--reference`, `--zh-wav`, `--en-wav` and a new `--output-dir`. Use the frozen 13-scenario/508-push reference from `test_r2t2_native_cache.py`, `--rounds 2 --repeats 3 --order ABBA`, and idle other compilation/inference. It preloads the same CUDA dependencies in separate resident-model workers, alternates ABBA/BAAB order, checks every replay against the reference and saves raw timings, hashes and GPU snapshots. Independent process blocks and complete recordings are the repeated measurements; individual feeds are correlated.
+
+The queued-upload lifetime/work guard and exact-prefix guard use the same CPU source/libraries arguments with `scripts/test_r2t2_prefill_async.py` and `scripts/test_r2t2_prefix_reuse.py`. Their `--baseline` is the frozen asr9 runtime with LF SHA-256 `e846316ce0953f9311479bb8083fea09d1917ea1541b0f05ddd3cdc912e54bd0`, retained before applying the asr10 patch. To reconstruct it, apply the patch from project commit `47064e24525b36b4b539d2c95cd6ab9d316931ab` to a separate checkout of the pinned audio.cpp revision. Each runner checks exact arithmetic against that baseline and requires the baseline to fail its separate work criterion. `--no-build` verifies compiled input and executable fingerprints before replaying.
+
+The same asr9 checkout supplies the four pinned frontend/DSP source and header files for the raw-log cache regression:
+
+```powershell
+python scripts/test_r2t2_logmel_cache.py --source build/r2t2/source --baseline-source build/r2t2/asr9-source --build-dir build/native-tests/r2t2-logmel
+```
+
+This check compares complete binary feature traces and counts actual sparse-mel and FFT work. Its baseline must pass numerics and fail the work contract; `--no-build` also validates source, generated overlay and executable fingerprints. Neither model weights nor CUDA are needed.
 
 The ignored Rust integration tests require these environment variables:
 

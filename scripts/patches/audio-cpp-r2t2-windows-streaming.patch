@@ -116,7 +116,7 @@ index 76cfe6b..a043008 100644
                                                       size_t index,
                                                       int64_t * out_start_sample,
 diff --git a/include/engine/community_models/confucius4_r2t2/frontend_whisper.h b/include/engine/community_models/confucius4_r2t2/frontend_whisper.h
-index 9b56577..ead7bc4 100644
+index 9b56577..c24a97c 100644
 --- a/include/engine/community_models/confucius4_r2t2/frontend_whisper.h
 +++ b/include/engine/community_models/confucius4_r2t2/frontend_whisper.h
 @@ -4,8 +4,9 @@
@@ -134,16 +134,16 @@ index 9b56577..ead7bc4 100644
      R2T2ASRAudioFeatures extract(const runtime::AudioBuffer & audio) const;
  
  private:
-+    struct MagnitudeCache {
++    struct LogMelCache {
 +        std::mutex mutex;
 +        std::vector<float> samples;
-+        engine::audio::AudioTensor magnitude;
++        engine::audio::WhisperLogMelFeatures log_mel;
 +    };
 +
      std::shared_ptr<const R2T2ASRAssets> assets_;
      engine::audio::WhisperLogMelExtractor extractor_;
 +    // Keep the frontend copyable; copies share only this synchronized cache.
-+    std::shared_ptr<MagnitudeCache> cache_ = std::make_shared<MagnitudeCache>();
++    std::shared_ptr<LogMelCache> cache_ = std::make_shared<LogMelCache>();
  };
  
  }  // namespace engine::community_models::confucius4_r2t2
@@ -234,15 +234,18 @@ index dc0f525..e920924 100644
  /// Part before the <asr_text> tag (empty when the tag is absent).
  std::string text_before_asr_tag(const std::string & text);
 diff --git a/include/engine/framework/audio/dsp.h b/include/engine/framework/audio/dsp.h
-index 7a12f98..063d8ca 100644
+index 7a12f98..bd61595 100644
 --- a/include/engine/framework/audio/dsp.h
 +++ b/include/engine/framework/audio/dsp.h
-@@ -131,8 +131,9 @@ public:
+@@ -131,8 +131,12 @@ public:
      const WhisperLogMelConfig & config() const noexcept;
      WhisperLogMelFeatures compute(
          const std::vector<float> & samples,
          size_t threads = 0) const;
 +    WhisperLogMelFeatures compute_from_magnitude(const AudioTensor & magnitude) const;
++    // Raw log energies precede the global floor and are reusable per STFT column.
++    WhisperLogMelFeatures compute_log_from_magnitude(const AudioTensor & magnitude) const;
++    static WhisperLogMelFeatures normalize_log_features(WhisperLogMelFeatures features);
  
  private:
      WhisperLogMelConfig config_;
@@ -288,6 +291,22 @@ index 162532a..df2208f 100644
  
  // Greedy autoregressive decoding over a Qwen-style decoder stack: prefill
  // with optional audio-embedding injection (ggml_set_rows at prompt
+diff --git a/include/engine/framework/runtime/kv_cache.h b/include/engine/framework/runtime/kv_cache.h
+index e8671e3..f16f010 100644
+--- a/include/engine/framework/runtime/kv_cache.h
++++ b/include/engine/framework/runtime/kv_cache.h
+@@ -54,9 +54,10 @@ public:
+         std::vector<core::TensorValue> values,
+         TransformerKVCacheOptions options);
+ 
+     void import_state(const TransformerKVState & state);
+-    void clear_on_backend();
++    // Keep a contiguous non-ring prefix and zero all masked future rows.
++    void clear_on_backend(int64_t keep_prefix_steps = 0);
+     TransformerKVState export_state() const;
+ 
+     void advance_after_direct_append(int64_t steps);
+     void retain_prefix(int64_t prefix_steps);
 diff --git a/include/engine/framework/runtime/session.h b/include/engine/framework/runtime/session.h
 index bdc03f2..3a8011c 100644
 --- a/include/engine/framework/runtime/session.h
@@ -356,7 +375,7 @@ index 1582084..9c3860e 100644
  }
  
 diff --git a/src/community_models/confucius4_r2t2/frontend_whisper.cpp b/src/community_models/confucius4_r2t2/frontend_whisper.cpp
-index e1b670e..c637b8b 100644
+index e1b670e..23cced1 100644
 --- a/src/community_models/confucius4_r2t2/frontend_whisper.cpp
 +++ b/src/community_models/confucius4_r2t2/frontend_whisper.cpp
 @@ -7,8 +7,9 @@
@@ -369,7 +388,7 @@ index e1b670e..c637b8b 100644
  #include <utility>
  
  namespace engine::community_models::confucius4_r2t2 {
-@@ -75,9 +76,64 @@ R2T2ASRAudioFeatures R2T2ASRWhisperFrontend::extract(const runtime::AudioBuffer
+@@ -75,9 +76,71 @@ R2T2ASRAudioFeatures R2T2ASRWhisperFrontend::extract(const runtime::AudioBuffer
      auto samples = normalize_audio(audio, config.sample_rate);
      const auto normalize_end = Clock::now();
  
@@ -387,49 +406,56 @@ index e1b670e..c637b8b 100644
 +        const int64_t previous_samples = static_cast<int64_t>(cache_->samples.size());
 +        const int64_t sample_count = static_cast<int64_t>(samples.size());
 +        const int64_t pad = dsp_config.n_fft / 2;
-+        int64_t stable_frames = 0;
-+        // Longer FFTs can reflect repeatedly through the old input. Use the full
-+        // extraction until the old window contains a complete FFT instead.
-+        if (previous_samples >= dsp_config.n_fft && sample_count >= previous_samples &&
++        const bool prefix_matches = previous_samples > 0 && sample_count >= previous_samples &&
 +            std::memcmp(samples.data(), cache_->samples.data(),
-+                        cache_->samples.size() * sizeof(float)) == 0) {
-+            stable_frames = 1 + (previous_samples - (dsp_config.n_fft - pad)) / dsp_config.hop_length;
-+        }
-+
-+        engine::audio::AudioTensor magnitude;
-+        if (stable_frames == 0) {
-+            magnitude = engine::audio::STFT().compute_magnitude(samples, window, 1, sample_count, stft_config);
++                        cache_->samples.size() * sizeof(float)) == 0;
++        if (prefix_matches && sample_count == previous_samples) {
++            features = extractor_.normalize_log_features(cache_->log_mel);
 +        } else {
 +            const int64_t frames = 1 + (sample_count + 2 * pad - dsp_config.n_fft) / dsp_config.hop_length;
-+            const int64_t freq_bins = dsp_config.n_fft / 2 + 1;
-+            const int64_t previous_frames = cache_->magnitude.shape[2];
-+            const int64_t tail_frames = frames - stable_frames;
-+            magnitude.shape = {1, freq_bins, frames};
-+            magnitude.values.resize(static_cast<size_t>(freq_bins * frames));
-+            engine::audio::AudioTensor tail;
-+            if (tail_frames > 0) {
-+                const int64_t start = stable_frames * dsp_config.hop_length - pad;
-+                std::vector<float> tail_samples(samples.begin() + start, samples.end());
-+                for (int64_t i = 0; i < pad; ++i) {
-+                    tail_samples.push_back(samples[static_cast<size_t>(sample_count - i - 2)]);
-+                }
-+                stft_config.center = false;
-+                tail = engine::audio::STFT().compute_magnitude(
-+                    tail_samples, window, 1, static_cast<int64_t>(tail_samples.size()), stft_config);
++            int64_t stable_frames = 0;
++            // Longer FFTs may reflect repeatedly through the old input. Reuse
++            // appended columns only after a complete FFT fits in the old PCM.
++            if (prefix_matches && previous_samples >= dsp_config.n_fft) {
++                stable_frames = std::min(cache_->log_mel.frames,
++                    1 + (previous_samples - (dsp_config.n_fft - pad)) / dsp_config.hop_length);
 +            }
-+            for (int64_t f = 0; f < freq_bins; ++f) {
-+                auto destination = magnitude.values.begin() + f * frames;
-+                std::copy_n(cache_->magnitude.values.begin() + f * previous_frames, stable_frames, destination);
-+                if (tail_frames > 0) {
-+                    std::copy_n(tail.values.begin() + f * tail_frames, tail_frames, destination + stable_frames);
++            engine::audio::WhisperLogMelFeatures log_mel;
++            if (stable_frames == 0) {
++                const auto magnitude = engine::audio::STFT().compute_magnitude(
++                    samples, window, 1, sample_count, stft_config);
++                log_mel = extractor_.compute_log_from_magnitude(magnitude);
++            } else {
++                log_mel.mel_bins = dsp_config.feature_size;
++                log_mel.frames = frames - 1;
++                log_mel.values.resize(static_cast<size_t>(log_mel.mel_bins * log_mel.frames));
++                engine::audio::WhisperLogMelFeatures tail;
++                if (log_mel.frames > stable_frames) {
++                    const int64_t start = stable_frames * dsp_config.hop_length - pad;
++                    std::vector<float> tail_samples(samples.begin() + start, samples.end());
++                    for (int64_t i = 0; i < pad; ++i) {
++                        tail_samples.push_back(samples[static_cast<size_t>(sample_count - i - 2)]);
++                    }
++                    stft_config.center = false;
++                    const auto magnitude = engine::audio::STFT().compute_magnitude(
++                        tail_samples, window, 1, static_cast<int64_t>(tail_samples.size()), stft_config);
++                    tail = extractor_.compute_log_from_magnitude(magnitude);
++                }
++                for (int64_t mel = 0; mel < log_mel.mel_bins; ++mel) {
++                    auto destination = log_mel.values.begin() + mel * log_mel.frames;
++                    std::copy_n(cache_->log_mel.values.begin() + mel * cache_->log_mel.frames,
++                                stable_frames, destination);
++                    if (tail.frames > 0) {
++                        std::copy_n(tail.values.begin() + mel * tail.frames, tail.frames, destination + stable_frames);
++                    }
 +                }
 +            }
++            // Loud appends can change the floor in every old column. Cache raw
++            // log energies, then normalize a copy against the new global max.
++            features = extractor_.normalize_log_features(log_mel);
++            cache_->samples = std::move(samples);
++            cache_->log_mel = std::move(log_mel);
 +        }
-+        // The global log-mel floor may change old features when loud audio is
-+        // appended, so only raw magnitudes participate in reuse.
-+        features = extractor_.compute_from_magnitude(magnitude);
-+        cache_->samples = std::move(samples);
-+        cache_->magnitude = std::move(magnitude);
 +    }
      const auto feature_end = Clock::now();
  
@@ -837,10 +863,10 @@ index 0b3474f..82c8689 100644
      out.reserve(text.size() + 16);
      size_t i = 0;
 diff --git a/src/framework/audio/dsp.cpp b/src/framework/audio/dsp.cpp
-index 0397642..5e0c9e9 100644
+index 0397642..3ccc863 100644
 --- a/src/framework/audio/dsp.cpp
 +++ b/src/framework/audio/dsp.cpp
-@@ -774,10 +774,15 @@ WhisperLogMelFeatures WhisperLogMelExtractor::compute(
+@@ -774,10 +774,19 @@ WhisperLogMelFeatures WhisperLogMelExtractor::compute(
          1,
          static_cast<int64_t>(samples.size()),
          stft_config,
@@ -851,6 +877,10 @@ index 0397642..5e0c9e9 100644
 +}
 +
 +WhisperLogMelFeatures WhisperLogMelExtractor::compute_from_magnitude(const AudioTensor & magnitude) const {
++    return normalize_log_features(compute_log_from_magnitude(magnitude));
++}
++
++WhisperLogMelFeatures WhisperLogMelExtractor::compute_log_from_magnitude(const AudioTensor & magnitude) const {
 +    if (magnitude.shape.size() != 3 || magnitude.shape[0] != 1 ||
 +        magnitude.shape[1] != config_.n_fft / 2 + 1) {
 +        throw std::runtime_error("Whisper log-mel STFT returned unexpected shape");
@@ -858,14 +888,172 @@ index 0397642..5e0c9e9 100644
      const int64_t freq_bins = magnitude.shape[1];
      const int64_t stft_frames = magnitude.shape[2];
      if (stft_frames <= 1) {
+@@ -795,19 +804,29 @@ WhisperLogMelFeatures WhisperLogMelExtractor::compute(
+         filterbank_);
+     if (mel.shape.size() != 3 || mel.shape[1] != out.mel_bins || mel.shape[2] != out.frames) {
+         throw std::runtime_error("Whisper log-mel frontend returned unexpected shape");
+     }
+-    float max_log = -INFINITY;
+     for (float & value : mel.values) {
+         value = std::log10(std::max(value, 1.0e-10F));
++    }
++    out.values = std::move(mel.values);
++    return out;
++}
++
++WhisperLogMelFeatures WhisperLogMelExtractor::normalize_log_features(WhisperLogMelFeatures features) {
++    if (features.mel_bins <= 0 || features.frames <= 0 ||
++        features.values.size() != static_cast<size_t>(features.mel_bins * features.frames)) {
++        throw std::runtime_error("Whisper log-mel features have invalid shape");
++    }
++    float max_log = -INFINITY;
++    for (float value : features.values) {
+         max_log = std::max(max_log, value);
+     }
+     const float floor = max_log - 8.0F;
+-    for (float & value : mel.values) {
++    for (float & value : features.values) {
+         value = (std::max(value, floor) + 4.0F) / 4.0F;
+     }
+-    out.values = std::move(mel.values);
+-    return out;
++    return features;
+ }
+ 
+ AudioTensor MelSpectrogram::compute(
+     const std::vector<float> & waveform,
 diff --git a/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp b/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp
-index 37637bd..a1fe58c 100644
+index 37637bd..9f27226 100644
 --- a/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp
 +++ b/src/framework/modules/transformers/qwen_causal_decode_runtime.cpp
-@@ -654,16 +654,22 @@ public:
-             ggml_backend_tensor_set(block_positions_, positions.data(), 0, positions.size() * sizeof(int32_t));
-             ggml_backend_tensor_set(block_mask_, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
-             ggml_backend_tensor_set(block_last_, &last, 0, sizeof(last));
+@@ -10,8 +10,9 @@
+ #include <ggml.h>
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <cstring>
+ #include <limits>
+ #include <memory>
+ #include <stdexcept>
+ #include <utility>
+@@ -517,8 +518,9 @@ public:
+         release_runtime_graphs();
+     }
+ 
+     QwenCausalPrefillResult prefill_tokens(const std::vector<int32_t> & token_ids) {
++        cached_prefill_embeddings_.clear();
+         if (token_ids.empty()) {
+             throw std::runtime_error("QwenCausalDecodeRuntime prefill requires tokens");
+         }
+         ensure_prefill_token_graph(static_cast<int64_t>(token_ids.size()), false);
+@@ -532,8 +534,9 @@ public:
+ 
+     QwenCausalPrefillIntoDecodeResult prefill_tokens_into_decode_cache(
+         const std::vector<int32_t> & token_ids,
+         int64_t required_cache_steps) {
++        cached_prefill_embeddings_.clear();
+         if (token_ids.empty()) {
+             throw std::runtime_error("QwenCausalDecodeRuntime prefill requires tokens");
+         }
+         if (required_cache_steps <= 0) {
+@@ -556,8 +559,9 @@ public:
+         return run_prefill_into_decode_cache();
+     }
+ 
+     QwenCausalPrefillResult prefill_embeddings(const std::vector<float> & embeddings, int64_t steps) {
++        cached_prefill_embeddings_.clear();
+         if (steps <= 0) {
+             throw std::runtime_error("QwenCausalDecodeRuntime prefill requires positive embedding steps");
+         }
+         const size_t expected = static_cast<size_t>(steps * config_.decoder.stack.hidden_size);
+@@ -576,8 +580,9 @@ public:
+     QwenCausalBatchedPrefillResult prefill_tokens_batched(
+         const std::vector<int32_t> & token_ids,
+         int64_t batch_size,
+         int64_t steps) {
++        cached_prefill_embeddings_.clear();
+         if (batch_size <= 0 || steps <= 0) {
+             throw std::runtime_error("QwenCausalDecodeRuntime batched prefill requires positive batch and steps");
+         }
+         if (token_ids.size() != static_cast<size_t>(batch_size * steps)) {
+@@ -595,8 +600,9 @@ public:
+     QwenCausalBatchedPrefillResult prefill_embeddings_batched(
+         const std::vector<float> & embeddings,
+         int64_t batch_size,
+         int64_t steps) {
++        cached_prefill_embeddings_.clear();
+         if (batch_size <= 0 || steps <= 0) {
+             throw std::runtime_error("QwenCausalDecodeRuntime batched prefill requires positive batch and steps");
+         }
+         const size_t expected = static_cast<size_t>(batch_size * steps * config_.decoder.stack.hidden_size);
+@@ -613,8 +619,10 @@ public:
+     }
+ 
+     QwenCausalDecodeStepResult prefill_embeddings_into_cache(
+         const std::vector<float> & embeddings, int64_t steps, int64_t cache_steps, int64_t chunk_steps) {
++        // A failed or interrupted prefill must not leave a reusable snapshot.
++        auto previous_embeddings = std::move(cached_prefill_embeddings_);
+         if (steps <= 0 || chunk_steps <= 0 || cache_steps < steps ||
+             embeddings.size() != static_cast<size_t>(steps * config_.decoder.stack.hidden_size)) {
+             throw std::runtime_error("Qwen chunked prefill has invalid dimensions");
+         }
+@@ -625,19 +633,39 @@ public:
+         }
+         const int64_t chunk = std::min(steps, chunk_steps);
+         // Padding writes only unused future slots; those slots stay masked until overwritten.
+         const int64_t capacity = std::max(cache_steps, ((steps + chunk - 1) / chunk) * chunk);
++        const bool same_shape = config_.sliding_window == 0 && decode_graph_ != nullptr &&
++            decode_input_kind_ == InputKind::Token && decode_cache_steps_ >= capacity &&
++            block_steps_ == chunk;
+         ensure_decode_token_graph(capacity);
+         if (block_steps_ != chunk) {
+             release_block_graph();
+             build_block_graph(chunk);
+         }
+-        decode_cache_.clear_on_backend();
+         const int64_t width = config_.decoder.stack.hidden_size;
++        int64_t reused_steps = 0;
++        if (same_shape) {
++            const int64_t previous_steps = static_cast<int64_t>(previous_embeddings.size() / width);
++            const int64_t limit = std::min(steps - 1, previous_steps) / chunk * chunk;
++            if (decode_cache_.valid_steps() >= previous_steps) {
++                for (; reused_steps < limit; reused_steps += chunk) {
++                    const size_t offset = static_cast<size_t>(reused_steps * width);
++                    if (std::memcmp(embeddings.data() + offset, previous_embeddings.data() + offset,
++                                    static_cast<size_t>(chunk * width) * sizeof(float)) != 0) {
++                        break;
++                    }
++                }
++            }
++        }
++        // Future V rows still take part in masked multiplication: clear them
++        // even when an unchanged prefix can stay on device (0 * NaN is NaN).
++        decode_cache_.clear_on_backend(reused_steps);
++        debug::trace_log_scalar(config_.trace_name + ".prefill.reused_steps", reused_steps);
+         std::vector<float> input(static_cast<size_t>(chunk * width));
+         std::vector<ggml_fp16_t> mask(static_cast<size_t>(chunk * decode_cache_steps_));
+         const auto masked = ggml_fp32_to_fp16(-std::numeric_limits<float>::infinity());
+-        for (int64_t offset = 0; offset < steps; offset += chunk) {
++        for (int64_t offset = reused_steps; offset < steps; offset += chunk) {
+             const int64_t count = std::min(chunk, steps - offset);
+             std::fill(input.begin(), input.end(), 0.f);
+             std::copy_n(embeddings.data() + offset * width, count * width, input.data());
+             auto positions = qwen_position_ids(chunk, offset);
+@@ -649,37 +677,49 @@ public:
+                           mask.begin() + q * decode_cache_steps_ + offset + q + 1,
+                           ggml_fp32_to_fp16(0.f));
+             }
+             const int32_t last = static_cast<int32_t>(count - 1);
+-            ggml_backend_tensor_set(block_input_, input.data(), 0, input.size() * sizeof(float));
+-            ggml_backend_tensor_set(block_positions_, positions.data(), 0, positions.size() * sizeof(int32_t));
+-            ggml_backend_tensor_set(block_mask_, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
+-            ggml_backend_tensor_set(block_last_, &last, 0, sizeof(last));
++            // Input storage stays alive until the synchronous graph compute below.
++            // Queue same-stream uploads together instead of waiting after each copy.
++            ggml_backend_tensor_set_async(backend_, block_input_, input.data(), 0, input.size() * sizeof(float));
++            ggml_backend_tensor_set_async(backend_, block_positions_, positions.data(), 0, positions.size() * sizeof(int32_t));
++            ggml_backend_tensor_set_async(backend_, block_mask_, mask.data(), 0, mask.size() * sizeof(ggml_fp16_t));
++            ggml_backend_tensor_set_async(backend_, block_last_, &last, 0, sizeof(last));
              core::set_backend_threads(backend_, threads_);
 -            if (core::compute_backend_graph(backend_, block_graph_) != GGML_STATUS_SUCCESS) {
 +            auto * graph = offset + count < steps ? block_cache_graph_ : block_graph_;
@@ -887,7 +1075,47 @@ index 37637bd..a1fe58c 100644
              result.hidden = core::read_tensor_f32(block_hidden_);
              round_readback(result.hidden, config_);
          }
-@@ -798,8 +804,16 @@ private:
++        previous_embeddings.assign(embeddings.begin(), embeddings.end());
++        cached_prefill_embeddings_ = std::move(previous_embeddings);
+         return result;
+     }
+ 
+     void start_decode_tokens(const runtime::TransformerKVState & state, int64_t required_cache_steps) {
++        cached_prefill_embeddings_.clear();
+         if (required_cache_steps <= 0) {
+             throw std::runtime_error("QwenCausalDecodeRuntime decode requires positive cache capacity");
+         }
+         ensure_decode_token_graph(required_cache_steps);
+         decode_cache_.import_state(state);
+     }
+ 
+     void start_decode_embeddings(const runtime::TransformerKVState & state, int64_t required_cache_steps) {
++        cached_prefill_embeddings_.clear();
+         if (required_cache_steps <= 0) {
+             throw std::runtime_error("QwenCausalDecodeRuntime decode requires positive cache capacity");
+         }
+         ensure_decode_embedding_graph(required_cache_steps);
+@@ -718,8 +758,9 @@ public:
+ 
+     void start_decode_tokens_batched(
+         const runtime::TransformerBatchedKVState & state,
+         int64_t required_cache_steps) {
++        cached_prefill_embeddings_.clear();
+         if (required_cache_steps <= 0) {
+             throw std::runtime_error("QwenCausalDecodeRuntime batched decode requires positive cache capacity");
+         }
+         const bool variable_positions =
+@@ -734,8 +775,9 @@ public:
+ 
+     void start_decode_embeddings_batched(
+         const runtime::TransformerBatchedKVState & state,
+         int64_t required_cache_steps) {
++        cached_prefill_embeddings_.clear();
+         if (required_cache_steps <= 0) {
+             throw std::runtime_error("QwenCausalDecodeRuntime batched decode requires positive cache capacity");
+         }
+         const bool variable_positions =
+@@ -798,8 +840,16 @@ private:
          Token,
          Embedding,
      };
@@ -904,7 +1132,7 @@ index 37637bd..a1fe58c 100644
          if (prefill_graph_ != nullptr && prefill_input_kind_ == InputKind::Token && prefill_steps_ == steps &&
              prefill_populates_decode_cache_ == populate_decode_cache) {
              debug::trace_log_scalar(config_.trace_name + ".prefill.steps", steps);
-@@ -1341,13 +1355,19 @@ private:
+@@ -1341,13 +1391,19 @@ private:
                      config_,
                      logits,
                      wrap_logits_readback_token_ids(decode_logits_readback_token_ids_, config_));
@@ -929,7 +1157,7 @@ index 37637bd..a1fe58c 100644
          if (config_.return_hidden || config_.output_mode == QwenCausalDecodeOutputMode::Hidden) {
              decode_hidden_ = ggml_cpy(
                  decode_ctx_.get(),
-@@ -1357,8 +1377,11 @@ private:
+@@ -1357,8 +1413,11 @@ private:
          }
          if (decode_logits_ != nullptr) {
              ggml_build_forward_expand(decode_graph_, decode_logits_);
@@ -941,7 +1169,7 @@ index 37637bd..a1fe58c 100644
              ggml_build_forward_expand(decode_graph_, decode_hidden_);
          }
          decode_buffer_ = ggml_backend_alloc_ctx_tensors(decode_ctx_.get(), backend_);
-@@ -1564,8 +1587,12 @@ private:
+@@ -1564,8 +1623,12 @@ private:
          if (status != GGML_STATUS_SUCCESS) {
              throw std::runtime_error("QwenCausalDecodeRuntime decode graph compute failed");
          }
@@ -954,7 +1182,7 @@ index 37637bd..a1fe58c 100644
              out.logits.resize(static_cast<size_t>(ggml_nelements(decode_logits_)));
              ggml_backend_tensor_get(decode_logits_, out.logits.data(), 0, out.logits.size() * sizeof(float));
          }
-@@ -1609,8 +1636,13 @@ private:
+@@ -1609,8 +1672,13 @@ private:
          ggml_backend_synchronize(backend_);
          if (status != GGML_STATUS_SUCCESS) {
              throw std::runtime_error("QwenCausalDecodeRuntime decode graph compute failed");
@@ -968,7 +1196,7 @@ index 37637bd..a1fe58c 100644
              out.logits.resize(static_cast<size_t>(ggml_nelements(decode_logits_)));
              ggml_backend_tensor_get(decode_logits_, out.logits.data(), 0, out.logits.size() * sizeof(float));
          } else {
-@@ -1784,8 +1816,9 @@ private:
+@@ -1784,8 +1852,9 @@ private:
              hidden = layer.build_with_static_cache_block(ctx, block_graph_, hidden, positions,
                  weights_.stack.layers[i], decode_cache_.key_tensor(i), decode_cache_.value_tensor(i),
                  positions, mask).output;
@@ -978,7 +1206,7 @@ index 37637bd..a1fe58c 100644
              core::TensorShape::from_dims({chunk, config_.decoder.stack.hidden_size}));
          hidden = core::wrap_tensor(ggml_get_rows(ctx.ggml, hidden.tensor, block_last_),
              core::TensorShape::from_dims({1, 1, config_.decoder.stack.hidden_size}), GGML_TYPE_F32);
-@@ -1803,29 +1836,50 @@ private:
+@@ -1803,33 +1872,55 @@ private:
              }
              block_logits_ = LinearModule({config_.decoder.stack.hidden_size, config_.decoder.logits_size,
                  config_.decoder.use_lm_head_bias, config_.decoder.lm_head_precision})
@@ -1031,7 +1259,12 @@ index 37637bd..a1fe58c 100644
      }
  
      void release_decode_graph() {
-@@ -1847,8 +1901,9 @@ private:
++        cached_prefill_embeddings_.clear();
+         release_block_graph();
+         if (prefill_populates_decode_cache_) {
+             release_prefill_graph();
+         }
+@@ -1847,8 +1938,9 @@ private:
          decode_cache_slot_ = nullptr;
          decode_attention_mask_ = nullptr;
          decode_logits_readback_token_ids_ = nullptr;
@@ -1041,7 +1274,7 @@ index 37637bd..a1fe58c 100644
          decode_graph_ = nullptr;
          decode_cache_ = runtime::TransformerKVCache();
          decode_attention_mask_values_.clear();
-@@ -1933,10 +1988,12 @@ private:
+@@ -1933,19 +2025,23 @@ private:
      ggml_tensor * block_positions_ = nullptr;
      ggml_tensor * block_mask_ = nullptr;
      ggml_tensor * block_last_ = nullptr;
@@ -1052,9 +1285,10 @@ index 37637bd..a1fe58c 100644
 +    ggml_cgraph * block_cache_graph_ = nullptr;
      ggml_gallocr_t block_allocator_ = nullptr;
      int64_t block_steps_ = 0;
++    std::vector<float> cached_prefill_embeddings_;
      std::unique_ptr<ggml_context, GgmlContextDeleter> decode_ctx_;
      ggml_tensor * decode_input_ = nullptr;
-@@ -1944,8 +2001,9 @@ private:
+     ggml_tensor * decode_positions_ = nullptr;
      ggml_tensor * decode_cache_slot_ = nullptr;
      ggml_tensor * decode_attention_mask_ = nullptr;
      ggml_tensor * decode_logits_readback_token_ids_ = nullptr;
@@ -1100,6 +1334,40 @@ index bcbb5f5..1b1dad2 100644
          }
          return out;
      }
+diff --git a/src/framework/runtime/kv_cache.cpp b/src/framework/runtime/kv_cache.cpp
+index 0ee1000..ce7424a 100644
+--- a/src/framework/runtime/kv_cache.cpp
++++ b/src/framework/runtime/kv_cache.cpp
+@@ -121,15 +121,24 @@ TransformerKVCache::TransformerKVCache(
+         });
+     }
+ }
+ 
+-void TransformerKVCache::clear_on_backend() {
++void TransformerKVCache::clear_on_backend(int64_t keep_prefix_steps) {
++    if (keep_prefix_steps < 0 || keep_prefix_steps > valid_steps_ ||
++        (options_.ring_mode && keep_prefix_steps != 0)) {
++        throw std::runtime_error("TransformerKVCache cannot preserve the requested contiguous prefix");
++    }
+     for (auto & layer : layers_) {
+-        ggml_backend_tensor_memset(layer.key_tensor.tensor, 0, 0, ggml_nbytes(layer.key_tensor.tensor));
+-        ggml_backend_tensor_memset(layer.value_tensor.tensor, 0, 0, ggml_nbytes(layer.value_tensor.tensor));
++        for (auto * tensor : {layer.key_tensor.tensor, layer.value_tensor.tensor}) {
++            const size_t offset = ggml_row_size(tensor->type, keep_prefix_steps * step_elems_);
++            const size_t bytes = ggml_nbytes(tensor) - offset;
++            if (bytes != 0) {
++                ggml_backend_tensor_memset(tensor, 0, offset, bytes);
++            }
++        }
+     }
+-    current_end_ = 0;
+-    valid_steps_ = 0;
++    current_end_ = keep_prefix_steps;
++    valid_steps_ = keep_prefix_steps;
+ }
+ 
+ void TransformerKVCache::import_state(const TransformerKVState & state) {
+     current_end_ = state.current_end;
 diff --git a/src/models/qwen3_asr/thinker.cpp b/src/models/qwen3_asr/thinker.cpp
 index 17a4fa3..15288fd 100644
 --- a/src/models/qwen3_asr/thinker.cpp
