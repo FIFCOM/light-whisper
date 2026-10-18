@@ -670,7 +670,7 @@ describe("SettingsPage provider configuration saves", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(tauriMock.setLlmProviderConfig).toHaveBeenCalledTimes(1);
-    expect(tauriMock.setLlmProviderConfig.mock.calls[0][2]).toBe("gpt-4.1-mini");
+    expect(tauriMock.setLlmProviderConfig.mock.calls[0][2]).toBe("gpt-6-luna");
   });
 
   it("cancels a queued assistant save before immediately persisting an assistant provider switch", async () => {
@@ -696,7 +696,7 @@ describe("SettingsPage provider configuration saves", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(tauriMock.setLlmProviderConfig).toHaveBeenCalledTimes(1);
-    expect(tauriMock.setLlmProviderConfig.mock.calls[0][6]).toBe("gpt-4.1-mini");
+    expect(tauriMock.setLlmProviderConfig.mock.calls[0][6]).toBe("gpt-6-luna");
   });
 
   it("cancels a queued save before adding and immediately selecting a custom provider", async () => {

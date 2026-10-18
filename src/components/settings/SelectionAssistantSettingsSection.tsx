@@ -65,7 +65,7 @@ export default function SelectionAssistantSettingsSection({
   const [excludedApps, setExcludedApps] = useState("");
   const [separate, setSeparate] = useState(false);
   const [provider, setProvider] = useState("openai");
-  const [model, setModel] = useState("gpt-4.1-mini");
+  const [model, setModel] = useState(findLlmPreset("openai").defaultModel);
   const [reasoning, setReasoning] = useState<LlmReasoningMode>("provider_default");
   const [apiKey, setApiKey] = useState("");
   const [providerSearch, setProviderSearch] = useState("");

@@ -328,7 +328,7 @@ fn xai_is_a_builtin_responses_provider() {
     let endpoint = llm_provider::endpoint_for_config(&config);
     assert_eq!(endpoint.provider, "xai");
     assert_eq!(endpoint.api_url, "https://api.x.ai/v1/responses");
-    assert_eq!(endpoint.model, "grok-4.6");
+    assert_eq!(endpoint.model, "grok-4.7");
     assert!(llm_provider::endpoint_uses_responses_api(&endpoint));
 }
 

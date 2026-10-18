@@ -73,18 +73,33 @@ async fn transcribe_via_dashscope_asr(
 ) -> Result<TranscriptionResult, AppError> {
     let data_url = format!("data:audio/wav;base64,{}", b64(&audio_wav));
 
-    let body = serde_json::json!({
-        "model": model,
-        "input": {
-            "messages": [
-                {"role": "system", "content": [{"text": ""}]},
-                {"role": "user", "content": [{"audio": data_url}]}
-            ]
-        },
-        "parameters": {
-            "asr_options": {"enable_itn": true}
-        }
-    });
+    let body = if model.starts_with("qwen-audio-3.")
+        && model.contains("-asr-flash")
+        && !model.contains("-filetrans")
+    {
+        serde_json::json!({
+            "model": model,
+            "input": {"messages": [{
+                "role": "user",
+                "content": [{"type": "input_audio", "input_audio": {"data": data_url}}]
+            }]},
+            // WAV carries the actual rate, including original-rate fallback recordings.
+            "parameters": {"format": "wav"}
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "input": {
+                "messages": [
+                    {"role": "system", "content": [{"text": ""}]},
+                    {"role": "user", "content": [{"audio": data_url}]}
+                ]
+            },
+            "parameters": {
+                "asr_options": {"enable_itn": true}
+            }
+        })
+    };
 
     let url = format!("{}{}", base, ASR_PATH);
     let resp = state
@@ -92,6 +107,7 @@ async fn transcribe_via_dashscope_asr(
         .post(&url)
         .bearer_auth(api_key)
         .header("Content-Type", "application/json")
+        .header("X-DashScope-SSE", "disable")
         .json(&body)
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .send()
@@ -132,10 +148,22 @@ async fn transcribe_via_dashscope_asr(
 
     let text_out = parsed
         .output
-        .and_then(|o| o.choices)
-        .and_then(|mut c| c.drain(..).next())
-        .and_then(|c| c.message)
-        .map(|m| m.content_text())
+        .and_then(|o| {
+            o.text
+                .or_else(|| {
+                    o.output?
+                        .pointer("/sentence/text")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .or_else(|| {
+                    o.choices?
+                        .into_iter()
+                        .next()?
+                        .message
+                        .map(|m| m.content_text())
+                })
+        })
         .unwrap_or_default();
 
     if text_out.is_empty() {
@@ -287,6 +315,8 @@ struct DashScopeAsrResponse {
 #[derive(Deserialize)]
 struct DashScopeAsrOutput {
     choices: Option<Vec<DashScopeAsrChoice>>,
+    text: Option<String>,
+    output: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -370,4 +400,224 @@ impl OmniStreamDelta {
 #[derive(Deserialize)]
 struct OmniStreamError {
     message: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const NATIVE_MODEL: &str = "qwen-audio-3.1-asr-flash";
+    const AUDIO: &[u8] = b"RIFFtest";
+    const AUDIO_DATA_URL: &str = "data:audio/wav;base64,UklGRnRlc3Q=";
+
+    struct CapturedRequest {
+        request_line: String,
+        headers: BTreeMap<String, String>,
+        body: Value,
+    }
+
+    async fn transcribe_at_capture_server(
+        model: &str,
+        status: &str,
+        response: Value,
+    ) -> (Result<TranscriptionResult, AppError>, CapturedRequest) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let response = response.to_string();
+        let status = status.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let (header_end, content_length) = loop {
+                let mut chunk = [0_u8; 4096];
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert!(count > 0, "client closed before completing the request");
+                request.extend_from_slice(&chunk[..count]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .expect("JSON request must have content-length");
+                if request.len() >= header_end + 4 + content_length {
+                    break (header_end, content_length);
+                }
+            };
+            let header_text = String::from_utf8_lossy(&request[..header_end]);
+            let mut header_lines = header_text.lines();
+            let request_line = header_lines.next().unwrap().to_string();
+            let headers = header_lines
+                .map(|line| {
+                    let (name, value) = line.split_once(':').unwrap();
+                    (name.to_ascii_lowercase(), value.trim().to_string())
+                })
+                .collect();
+            let body_start = header_end + 4;
+            let body = serde_json::from_slice(&request[body_start..body_start + content_length])
+                .expect("request body must be JSON");
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len(),
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            CapturedRequest {
+                request_line,
+                headers,
+                body,
+            }
+        });
+        let mut state = AppState::new();
+        state.http_client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            transcribe_via_dashscope_asr(&state, &base, model, "test-api-key", AUDIO.to_vec()),
+        )
+        .await
+        .expect("loopback transcription must finish");
+        let request = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("capture server must finish")
+            .expect("capture server must not panic");
+        (result, request)
+    }
+
+    #[tokio::test]
+    async fn native_model_sends_documented_audio_request_without_polishing() {
+        let (_, request) = transcribe_at_capture_server(
+            NATIVE_MODEL,
+            "200 OK",
+            json!({"output": {"text": "原始转写"}}),
+        )
+        .await;
+
+        assert_eq!(
+            request.request_line,
+            "POST /api/v1/services/aigc/multimodal-generation/generation HTTP/1.1"
+        );
+        assert_eq!(request.headers["authorization"], "Bearer test-api-key");
+        assert_eq!(request.headers["content-type"], "application/json");
+        assert_eq!(
+            request.body,
+            json!({
+                "model": NATIVE_MODEL,
+                "input": {"messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "input_audio",
+                        "input_audio": {"data": AUDIO_DATA_URL}
+                    }]
+                }]},
+                "parameters": {"format": "wav"}
+            })
+        );
+        assert_eq!(
+            request.headers.get("x-dashscope-sse").map(String::as_str),
+            Some("disable")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_model_returns_output_text() {
+        let (result, _) = transcribe_at_capture_server(
+            NATIVE_MODEL,
+            "200 OK",
+            json!({"output": {"text": "保留原话和数字 123。"}}),
+        )
+        .await;
+        let result = result.unwrap();
+        assert!(result.success);
+        assert_eq!(result.text, "保留原话和数字 123。");
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_model_returns_nested_sentence_text() {
+        let (result, _) = transcribe_at_capture_server(
+            NATIVE_MODEL,
+            "200 OK",
+            json!({"output": {"output": {"sentence": {"text": "嵌套的原始转写。"}}}}),
+        )
+        .await;
+        let result = result.unwrap();
+        assert!(result.success);
+        assert_eq!(result.text, "嵌套的原始转写。");
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_model_preserves_request_and_string_or_list_transcripts() {
+        for content in [
+            json!("旧版转写。"),
+            json!([{"text": "旧版"}, {"text": "转写。"}]),
+        ] {
+            let (result, request) = transcribe_at_capture_server(
+                "qwen3-asr-flash",
+                "200 OK",
+                json!({"output": {"choices": [{"message": {"content": content}}]}}),
+            )
+            .await;
+            assert_eq!(
+                request.request_line,
+                "POST /api/v1/services/aigc/multimodal-generation/generation HTTP/1.1"
+            );
+            assert_eq!(
+                request.body,
+                json!({
+                    "model": "qwen3-asr-flash",
+                    "input": {"messages": [
+                        {"role": "system", "content": [{"text": ""}]},
+                        {"role": "user", "content": [{"audio": AUDIO_DATA_URL}]}
+                    ]},
+                    "parameters": {"asr_options": {"enable_itn": true}}
+                })
+            );
+            let result = result.unwrap();
+            assert!(result.success);
+            assert_eq!(result.text, "旧版转写。");
+            assert!(result.error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_model_preserves_http_error_status_and_body() {
+        let (result, _) = transcribe_at_capture_server(
+            NATIVE_MODEL,
+            "429 Too Many Requests",
+            json!({"code": "Throttling", "message": "test quota exceeded"}),
+        )
+        .await;
+        let error = result.unwrap_err();
+        let AppError::Asr(message) = error else {
+            panic!("HTTP failure must remain an ASR error");
+        };
+        assert!(message.contains("429"));
+        assert!(message.contains("Throttling"));
+        assert!(message.contains("test quota exceeded"));
+    }
+
+    #[tokio::test]
+    async fn native_model_preserves_unsuccessful_api_result() {
+        let (result, _) = transcribe_at_capture_server(
+            NATIVE_MODEL,
+            "200 OK",
+            json!({"code": "InvalidApiKey", "message": "test key rejected"}),
+        )
+        .await;
+        let result = result.unwrap();
+        assert!(!result.success);
+        assert!(result.text.is_empty());
+        assert_eq!(result.error.as_deref(), Some("test key rejected"));
+    }
 }

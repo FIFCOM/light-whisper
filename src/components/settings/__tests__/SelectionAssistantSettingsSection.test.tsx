@@ -89,7 +89,7 @@ describe("SelectionAssistantSettingsSection", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(350); });
 
     expect(api.setSelectionAssistantConfig).toHaveBeenLastCalledWith(
-      expect.objectContaining({ useSeparateModel: true, provider: "xai", model: "grok-4.6" }),
+      expect.objectContaining({ useSeparateModel: true, provider: "xai", model: "grok-4.7" }),
     );
     expect(api.getSelectionApiKey).toHaveBeenLastCalledWith("xai");
     fireEvent.change(screen.getByPlaceholderText("xAI Grok API Key"), {

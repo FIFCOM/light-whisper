@@ -65,12 +65,12 @@ static AUTO_REASONING_STRATEGY_CACHE: OnceLock<
 
 fn default_endpoint_parts(provider: &str) -> (&'static str, &'static str, u64) {
     match provider {
-        OPENAI => ("https://api.openai.com", "gpt-4.1-mini", 10),
-        XAI => ("https://api.x.ai", "grok-4.6", 10),
-        DEEPSEEK => ("https://api.deepseek.com", "deepseek-v4-flash", 10),
-        SILICONFLOW => ("https://api.siliconflow.cn", "Qwen/Qwen3-32B", 10),
-        CUSTOM => ("http://127.0.0.1:8000", "gpt-4.1-mini", 10),
-        _ => ("https://api.cerebras.ai", "gpt-oss-120b", 5),
+        OPENAI => ("https://api.openai.com", "gpt-6-luna", 10),
+        XAI => ("https://api.x.ai", "grok-4.7", 10),
+        DEEPSEEK => ("https://api.deepseek.com", "deepseek-flash", 10),
+        SILICONFLOW => ("https://api.siliconflow.cn", "Qwen/Qwen3.8-27B", 10),
+        CUSTOM => ("http://127.0.0.1:8000", "gpt-6-luna", 10),
+        _ => ("https://api.cerebras.ai", "qwen-3.8-27b", 5),
     }
 }
 
@@ -212,7 +212,7 @@ fn endpoint_for_provider(
             provider: provider.to_string(),
             api_url,
             model: if model.trim().is_empty() {
-                "gpt-4.1-mini".to_string()
+                default_endpoint_parts(OPENAI).1.to_string()
             } else {
                 model.to_string()
             },
@@ -631,7 +631,7 @@ fn grok_supports_disabled_reasoning(model: &str) -> bool {
     tail.starts_with("grok-4.3") || tail.starts_with("grok-3")
 }
 
-/// Grok 4.5/4.6 cannot disable reasoning; omitted effort defaults to high.
+/// Grok 4.5 and later cannot disable reasoning; omitted effort defaults to high.
 fn grok_effort_for_mode(model: &str, mode: LlmReasoningMode) -> Option<&'static str> {
     match mode {
         LlmReasoningMode::Off => {
@@ -751,6 +751,7 @@ fn supports_siliconflow_reasoning(model: &str) -> bool {
     let normalized = model.trim().to_ascii_lowercase();
     let tail = normalized.rsplit('/').next().unwrap_or(&normalized);
     normalized.contains("qwen/qwen3-")
+        || tail == "qwen3.8-27b"
         || normalized.contains("qwen/qwq-")
         || normalized.contains("thudm/glm-z1-")
         || normalized.contains("minimaxai/minimax-m2.1")
@@ -767,7 +768,7 @@ fn supports_siliconflow_reasoning(model: &str) -> bool {
 fn supports_cerebras_reasoning(model: &str) -> bool {
     let normalized = model.trim().to_ascii_lowercase();
     let tail = normalized.rsplit('/').next().unwrap_or(&normalized);
-    tail == "gpt-oss-120b"
+    matches!(tail, "gpt-oss-120b" | "qwen-3.8-27b")
 }
 
 fn supports_deepseek_thinking(model: &str) -> bool {
@@ -775,7 +776,11 @@ fn supports_deepseek_thinking(model: &str) -> bool {
     let tail = normalized.rsplit('/').next().unwrap_or(&normalized);
     matches!(
         tail,
-        "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-chat" | "deepseek-reasoner"
+        "deepseek-flash"
+            | "deepseek-v4-flash"
+            | "deepseek-v4-pro"
+            | "deepseek-chat"
+            | "deepseek-reasoner"
     )
 }
 
@@ -813,7 +818,7 @@ impl ReasoningControlKind {
                 "当前模型支持 reasoning effort；关闭/轻量/标准/深度会映射为对应的推理强度。"
             }
             Self::XaiReasoningEffort => {
-                "当前 Grok 模型支持 reasoning.effort；关闭/轻量会映射为 low（Grok 4.5/4.6 无法关闭思考，省略参数会默认 high）。"
+                "当前 Grok 模型支持 reasoning.effort；关闭/轻量会映射为 low（Grok 4.5 及后续模型无法关闭思考，省略参数会默认 high）。"
             }
             Self::AnthropicThinking => {
                 "当前模型支持 extended thinking；会映射为 thinking + budget_tokens。"
@@ -1228,6 +1233,16 @@ pub fn apply_reasoning_controls(
         }
         (ReasoningControlKind::CerebrasReasoningEffort, _) => {
             let effort = match mode {
+                LlmReasoningMode::Off
+                    if endpoint
+                        .model
+                        .trim()
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|model| model.eq_ignore_ascii_case("qwen-3.8-27b")) =>
+                {
+                    "none"
+                }
                 LlmReasoningMode::Off => return,
                 LlmReasoningMode::Light => "low",
                 LlmReasoningMode::Balanced => "medium",
@@ -1474,6 +1489,135 @@ pub fn sync_runtime_api_key(app_handle: &tauri::AppHandle, state: &AppState) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_builtin_defaults_apply_to_polish_assistant_and_preview() {
+        for (provider, model, api_url) in [
+            (OPENAI, "gpt-6-luna", "https://api.openai.com/v1/responses"),
+            (XAI, "grok-4.7", "https://api.x.ai/v1/responses"),
+            (
+                CEREBRAS,
+                "qwen-3.8-27b",
+                "https://api.cerebras.ai/v1/chat/completions",
+            ),
+            (
+                SILICONFLOW,
+                "Qwen/Qwen3.8-27B",
+                "https://api.siliconflow.cn/v1/chat/completions",
+            ),
+        ] {
+            let config = LlmProviderConfig {
+                active: provider.to_string(),
+                assistant_use_separate_model: true,
+                assistant_provider: Some(provider.to_string()),
+                ..LlmProviderConfig::default()
+            };
+
+            for endpoint in [
+                endpoint_for_config(&config),
+                assistant_endpoint_for_config(&config),
+                endpoint_for_preview(provider, None, None, ApiFormat::OpenaiCompat),
+            ] {
+                assert_eq!(endpoint.provider, provider);
+                assert_eq!(endpoint.model, model, "provider={provider}");
+                assert_eq!(endpoint.api_url, api_url, "provider={provider}");
+                assert_eq!(endpoint.api_format, ApiFormat::OpenaiCompat);
+            }
+        }
+    }
+
+    #[test]
+    fn current_builtin_defaults_preserve_explicitly_saved_models() {
+        for (provider, model) in [
+            (OPENAI, "gpt-4.1-mini"),
+            (XAI, "grok-4.6"),
+            (CEREBRAS, "gpt-oss-20b"),
+            (SILICONFLOW, "Qwen/Qwen3-32B"),
+        ] {
+            let config = LlmProviderConfig {
+                active: provider.to_string(),
+                custom_model: Some(model.to_string()),
+                assistant_use_separate_model: true,
+                assistant_provider: Some(provider.to_string()),
+                assistant_model: Some(model.to_string()),
+                ..LlmProviderConfig::default()
+            };
+
+            assert_eq!(endpoint_for_config(&config).model, model);
+            assert_eq!(assistant_endpoint_for_config(&config).model, model);
+            assert_eq!(
+                endpoint_for_preview(provider, None, Some(model), ApiFormat::OpenaiCompat).model,
+                model
+            );
+        }
+    }
+
+    #[test]
+    fn empty_custom_models_use_current_openai_default_on_chat_endpoints() {
+        for (provider, base_url, api_url) in [
+            (CUSTOM, None, "http://127.0.0.1:8000/v1/chat/completions"),
+            (
+                "custom-gateway",
+                Some("https://gateway.example/custom/v1"),
+                "https://gateway.example/custom/v1/chat/completions",
+            ),
+        ] {
+            for model in [None, Some(" ")] {
+                let endpoint =
+                    endpoint_for_preview(provider, base_url, model, ApiFormat::OpenaiCompat);
+
+                assert_eq!(endpoint.provider, provider);
+                assert_eq!(endpoint.model, "gpt-6-luna", "provider={provider}");
+                assert_eq!(endpoint.api_url, api_url, "provider={provider}");
+                assert!(!endpoint_uses_responses_api(&endpoint));
+            }
+        }
+    }
+
+    #[test]
+    fn deepseek_defaults_to_canonical_flash_for_polish_and_separate_assistant() {
+        let polish_config = LlmProviderConfig {
+            active: DEEPSEEK.to_string(),
+            ..LlmProviderConfig::default()
+        };
+        let assistant_config = LlmProviderConfig {
+            assistant_use_separate_model: true,
+            assistant_provider: Some(DEEPSEEK.to_string()),
+            ..LlmProviderConfig::default()
+        };
+
+        for endpoint in [
+            endpoint_for_config(&polish_config),
+            assistant_endpoint_for_config(&assistant_config),
+        ] {
+            assert_eq!(endpoint.provider, DEEPSEEK);
+            assert_eq!(endpoint.model, "deepseek-flash");
+            assert_eq!(endpoint.api_format, ApiFormat::OpenaiCompat);
+        }
+    }
+
+    #[test]
+    fn deepseek_endpoints_preserve_explicitly_saved_models() {
+        for model in [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "deepseek-future",
+        ] {
+            let config = LlmProviderConfig {
+                active: DEEPSEEK.to_string(),
+                custom_model: Some(model.to_string()),
+                assistant_use_separate_model: true,
+                assistant_provider: Some(DEEPSEEK.to_string()),
+                assistant_model: Some(model.to_string()),
+                ..LlmProviderConfig::default()
+            };
+
+            assert_eq!(endpoint_for_config(&config).model, model);
+            assert_eq!(assistant_endpoint_for_config(&config).model, model);
+        }
+    }
 
     #[test]
     fn named_presets_ignore_custom_endpoint_overrides() {
@@ -2269,18 +2413,25 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v4_flash_reports_reasoning_support() {
-        let endpoint = endpoint_for_preview(
-            DEEPSEEK,
-            None,
-            Some("deepseek-v4-flash"),
-            ApiFormat::OpenaiCompat,
-        );
+    fn deepseek_flash_and_previous_models_report_reasoning_support() {
+        for model in [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-chat",
+        ] {
+            let endpoint =
+                endpoint_for_preview(DEEPSEEK, None, Some(model), ApiFormat::OpenaiCompat);
 
-        let support = reasoning_support(&endpoint, false);
+            let support = reasoning_support(&endpoint, false);
 
-        assert!(support.supported);
-        assert_eq!(support.strategy.as_deref(), Some("deepseek_thinking"));
+            assert!(support.supported, "model={model}");
+            assert_eq!(
+                support.strategy.as_deref(),
+                Some("deepseek_thinking"),
+                "model={model}"
+            );
+        }
     }
 
     #[test]
@@ -2364,6 +2515,90 @@ mod tests {
 
         assert_eq!(body["enable_thinking"], serde_json::json!(true));
         assert_eq!(body["thinking_budget"], serde_json::json!(4096));
+    }
+
+    #[test]
+    fn siliconflow_qwen_models_keep_native_thinking_controls() {
+        for model in ["Qwen/Qwen3.8-27B", "Qwen/Qwen3-32B"] {
+            let endpoint =
+                endpoint_for_preview(SILICONFLOW, None, Some(model), ApiFormat::OpenaiCompat);
+            let support = reasoning_support(&endpoint, false);
+
+            assert!(support.supported, "model={model}");
+            assert_eq!(
+                support.strategy.as_deref(),
+                Some("siliconflow_thinking_budget"),
+                "model={model}"
+            );
+            for (mode, expected) in [
+                (LlmReasoningMode::ProviderDefault, serde_json::json!({})),
+                (
+                    LlmReasoningMode::Off,
+                    serde_json::json!({ "enable_thinking": false }),
+                ),
+                (
+                    LlmReasoningMode::Light,
+                    serde_json::json!({ "enable_thinking": true, "thinking_budget": 1024 }),
+                ),
+                (
+                    LlmReasoningMode::Balanced,
+                    serde_json::json!({ "enable_thinking": true, "thinking_budget": 4096 }),
+                ),
+                (
+                    LlmReasoningMode::Deep,
+                    serde_json::json!({ "enable_thinking": true, "thinking_budget": 8192 }),
+                ),
+            ] {
+                let mut body = serde_json::json!({});
+                apply_reasoning_controls(&endpoint, false, &mut body, mode);
+
+                assert_eq!(body, expected, "model={model}, mode={mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cerebras_qwen_and_gpt_oss_keep_native_reasoning_modes() {
+        for (model, expected) in [
+            (
+                "qwen-3.8-27b",
+                serde_json::json!(["low", "none", "low", "medium", "high"]),
+            ),
+            (
+                "gpt-oss-120b",
+                serde_json::json!(["low", null, "low", "medium", "high"]),
+            ),
+        ] {
+            let endpoint =
+                endpoint_for_preview(CEREBRAS, None, Some(model), ApiFormat::OpenaiCompat);
+            let support = reasoning_support(&endpoint, false);
+
+            assert!(support.supported, "model={model}");
+            assert_eq!(
+                support.strategy.as_deref(),
+                Some("cerebras_reasoning_effort"),
+                "model={model}"
+            );
+            let efforts: Vec<Value> = [
+                LlmReasoningMode::ProviderDefault,
+                LlmReasoningMode::Off,
+                LlmReasoningMode::Light,
+                LlmReasoningMode::Balanced,
+                LlmReasoningMode::Deep,
+            ]
+            .into_iter()
+            .map(|mode| {
+                let mut body = serde_json::json!({});
+                apply_reasoning_controls(&endpoint, false, &mut body, mode);
+                if model == "gpt-oss-120b" && mode == LlmReasoningMode::Off {
+                    assert!(body.get("reasoning_effort").is_none());
+                }
+                body["reasoning_effort"].clone()
+            })
+            .collect();
+
+            assert_eq!(serde_json::json!(efforts), expected, "model={model}");
+        }
     }
 
     #[test]

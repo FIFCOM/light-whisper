@@ -22,7 +22,7 @@ pub struct GoogleGroundedSearch {
 
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 const GOOGLE_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
-const GOOGLE_GROUNDING_MODEL: &str = "gemini-3.1-flash-lite";
+const GOOGLE_GROUNDING_MODEL: &str = "gemini-3.5-flash-lite";
 const MAX_SEARCH_CONTEXT_RESULTS: usize = 10;
 const MAX_SEARCH_CONTEXT_BYTES: usize = 14_000;
 const MAX_SEARCH_RESULT_CONTENT_BYTES: usize = 1_000;
@@ -858,7 +858,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("latest Rust release"));
-        assert_eq!(GOOGLE_GROUNDING_MODEL, "gemini-3.1-flash-lite");
+        assert_eq!(GOOGLE_GROUNDING_MODEL, "gemini-3.5-flash-lite");
     }
 
     #[test]

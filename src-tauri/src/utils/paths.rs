@@ -88,15 +88,16 @@ const GLM_ENDPOINT_DOMESTIC: &str = "https://open.bigmodel.cn";
 const ALIBABA_ENDPOINT_INTERNATIONAL: &str = "https://dashscope-intl.aliyuncs.com";
 const ALIBABA_ENDPOINT_DOMESTIC: &str = "https://dashscope.aliyuncs.com";
 
-pub const ALIBABA_DEFAULT_MODEL: &str = "qwen3-asr-flash";
+pub const ALIBABA_DEFAULT_MODEL: &str = "qwen-audio-3.1-asr-flash";
 
-/// 运行时抓取失败时使用的静态兜底列表。包含 2026-04 已知在 DashScope 上架的
-/// 全部 Qwen ASR / Omni 家族模型；抓取成功后以实际结果为准，不受此列表限制。
+/// 运行时抓取失败时使用的 ASR / Omni 兜底列表，更新于 2026-10-18。
+/// 抓取成功后以账号实际可见模型为准，不受此列表限制。
 ///
 /// 走哪条 HTTP 路径由 `alibaba_model_uses_omni_chat` 运行时决定：
-/// - `qwen3-asr-*` → `/api/v1/services/aigc/multimodal-generation/generation`
+/// - Qwen Audio / Qwen3 ASR → `/api/v1/services/aigc/multimodal-generation/generation`
 /// - `*omni*` → `/compatible-mode/v1/chat/completions`
 pub const ALIBABA_FALLBACK_MODEL_IDS: &[&str] = &[
+    "qwen-audio-3.1-asr-flash",
     "qwen3-asr-flash",
     "qwen3-omni-flash",
     "qwen3-omni-plus",
@@ -141,7 +142,7 @@ pub fn is_asr_capable_model_id(id: &str) -> bool {
 }
 
 /// Omni 家族模型走 OpenAI-compat chat.completions 路径；
-/// 其它走 qwen3-asr-flash 专用的 multimodal-generation 路径。
+/// 其它走 ASR 专用的 multimodal-generation 路径。
 pub fn alibaba_model_uses_omni_chat(model: &str) -> bool {
     model.contains("omni")
 }
@@ -514,6 +515,16 @@ pub fn get_effective_models_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::engine_json_object_or_empty;
+
+    #[test]
+    fn alibaba_default_and_fallback_prefer_native_model_and_retain_legacy() {
+        assert_eq!(super::ALIBABA_DEFAULT_MODEL, "qwen-audio-3.1-asr-flash");
+        assert_eq!(
+            super::ALIBABA_FALLBACK_MODEL_IDS.first().copied(),
+            Some("qwen-audio-3.1-asr-flash")
+        );
+        assert!(super::ALIBABA_FALLBACK_MODEL_IDS.contains(&"qwen3-asr-flash"));
+    }
 
     #[test]
     fn engine_selection_migrates_17b_and_preserves_other_engines() {

@@ -113,7 +113,7 @@ import { useTranslation } from "react-i18next";
 const CorrectionRulesModal = lazy(() => import("@/components/settings/CorrectionRulesModal"));
 
 const DEFAULT_SCREEN_VISION_PROVIDER = "openai";
-const DEFAULT_SCREEN_VISION_MODEL = "gpt-4.1-mini";
+const DEFAULT_SCREEN_VISION_MODEL = findLlmPreset("openai").defaultModel;
 
 const engineOptions = [
   { key: "qwen3-asr-0.6b", icon: Zap, label: "Qwen3-ASR 0.6B Q8", labelKey: undefined, descKey: "settings.qwen3Asr06Desc" },

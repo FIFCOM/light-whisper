@@ -163,7 +163,7 @@ async fn dispatch_and_capture_with_reasoning(
 
 #[tokio::test]
 async fn deepseek_native_web_search_v4_assistant_dispatches_responses_wire_request() {
-    for model in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+    for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"] {
         let config = separate_assistant_config("deepseek", model, Vec::new());
         let polish_endpoint = endpoint_for_config(&config);
         let assistant_endpoint = assistant_endpoint_for_config(&config);
@@ -200,7 +200,7 @@ async fn deepseek_native_web_search_v4_assistant_dispatches_responses_wire_reque
 
 #[tokio::test]
 async fn deepseek_v4_reasoning_route_provider_default_uses_responses_wire_request() {
-    for model in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+    for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"] {
         let endpoint = assistant_endpoint_for_config(&separate_assistant_config(
             "deepseek",
             model,
@@ -232,7 +232,7 @@ async fn deepseek_v4_reasoning_route_provider_default_uses_responses_wire_reques
 
 #[tokio::test]
 async fn deepseek_v4_reasoning_route_maps_explicit_modes_to_responses_effort() {
-    for model in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+    for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"] {
         for (reasoning_mode, expected_effort) in [
             (LlmReasoningMode::Light, "low"),
             (LlmReasoningMode::Balanced, "medium"),
@@ -283,7 +283,7 @@ async fn deepseek_v4_reasoning_route_maps_explicit_modes_to_responses_effort() {
 
 #[tokio::test]
 async fn deepseek_v4_reasoning_route_off_uses_responses_and_disables_thinking() {
-    for model in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+    for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"] {
         let endpoint = assistant_endpoint_for_config(&separate_assistant_config(
             "deepseek",
             model,
@@ -316,7 +316,7 @@ async fn deepseek_v4_reasoning_route_off_uses_responses_and_disables_thinking() 
 
 #[tokio::test]
 async fn deepseek_v4_reasoning_route_web_search_overrides_off_to_responses() {
-    for model in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+    for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"] {
         let endpoint = assistant_endpoint_for_config(&separate_assistant_config(
             "deepseek",
             model,
@@ -388,7 +388,20 @@ async fn deepseek_v4_reasoning_route_keeps_legacy_models_on_chat_with_off_contro
 #[tokio::test]
 async fn deepseek_v4_reasoning_route_keeps_non_target_providers_and_models_on_chat() {
     let cases = [
+        ("deepseek", "deepseek-flash-preview", Vec::new()),
         ("deepseek", "deepseek-v4-flash-preview", Vec::new()),
+        ("deepseek", "deepseek-future", Vec::new()),
+        (
+            "custom-deepseek-gateway",
+            "deepseek-flash",
+            vec![CustomProvider {
+                id: "custom-deepseek-gateway".to_string(),
+                name: "Custom DeepSeek Gateway".to_string(),
+                base_url: "https://gateway.example/deepseek".to_string(),
+                model: "deepseek-flash".to_string(),
+                api_format: ApiFormat::OpenaiCompat,
+            }],
+        ),
         (
             "custom-deepseek-gateway",
             "deepseek-v4-flash",
@@ -466,7 +479,12 @@ async fn deepseek_v4_reasoning_route_keeps_openai_on_responses() {
 
 #[tokio::test]
 async fn deepseek_native_web_search_requires_exact_v4_model() {
-    for model in ["deepseek-v4-flash-preview", "deepseek-chat"] {
+    for model in [
+        "deepseek-flash-preview",
+        "deepseek-v4-flash-preview",
+        "deepseek-future",
+        "deepseek-chat",
+    ] {
         let endpoint = assistant_endpoint_for_config(&separate_assistant_config(
             "deepseek",
             model,
@@ -495,38 +513,42 @@ async fn deepseek_native_web_search_requires_exact_v4_model() {
 
 #[tokio::test]
 async fn deepseek_native_web_search_does_not_route_custom_provider_by_model_name() {
-    let endpoint = assistant_endpoint_for_config(&separate_assistant_config(
-        "custom-deepseek-gateway",
-        "deepseek-v4-flash",
-        vec![CustomProvider {
-            id: "custom-deepseek-gateway".to_string(),
-            name: "Custom DeepSeek Gateway".to_string(),
-            base_url: "https://gateway.example/deepseek".to_string(),
-            model: "deepseek-v4-flash".to_string(),
-            api_format: ApiFormat::OpenaiCompat,
-        }],
-    ));
+    for model in ["deepseek-flash", "deepseek-v4-flash"] {
+        let endpoint = assistant_endpoint_for_config(&separate_assistant_config(
+            "custom-deepseek-gateway",
+            model,
+            vec![CustomProvider {
+                id: "custom-deepseek-gateway".to_string(),
+                name: "Custom DeepSeek Gateway".to_string(),
+                base_url: "https://gateway.example/deepseek".to_string(),
+                model: model.to_string(),
+                api_format: ApiFormat::OpenaiCompat,
+            }],
+        ));
 
-    let (result, captured) = dispatch_and_capture(
-        endpoint,
-        "/v1/chat/completions",
-        chat_response("custom answer"),
-        true,
-    )
-    .await;
+        let (result, captured) = dispatch_and_capture(
+            endpoint,
+            "/v1/chat/completions",
+            chat_response("custom answer"),
+            true,
+        )
+        .await;
 
-    assert_eq!(captured.path, "/v1/chat/completions");
-    assert_eq!(
-        captured.body["tools"],
-        serde_json::json!([{
-            "type": "web_search_preview",
-            "web_search_preview": {}
-        }])
-    );
-    assert_eq!(
-        result.expect("custom Chat payload should parse"),
-        "custom answer"
-    );
+        assert_eq!(captured.path, "/v1/chat/completions", "model={model}");
+        assert_eq!(
+            captured.body["tools"],
+            serde_json::json!([{
+                "type": "web_search_preview",
+                "web_search_preview": {}
+            }]),
+            "model={model}"
+        );
+        assert_eq!(
+            result.expect("custom Chat payload should parse"),
+            "custom answer",
+            "model={model}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -594,36 +616,61 @@ async fn deepseek_native_web_search_keeps_custom_anthropic_dispatch() {
 }
 
 #[tokio::test]
-async fn deepseek_v4_reasoning_route_off_keeps_deepseek_polish_on_responses() {
-    for model in ["deepseek-v4-flash", "deepseek-v4-pro"] {
-        let config = LlmProviderConfig {
-            active: "deepseek".to_string(),
-            custom_model: Some(model.to_string()),
-            ..LlmProviderConfig::default()
-        };
-        let endpoint = endpoint_for_config(&config);
+async fn deepseek_reasoning_route_keeps_polish_modes_and_search_on_responses() {
+    for model in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"] {
+        for (reasoning_mode, expected_effort) in [
+            (LlmReasoningMode::ProviderDefault, None),
+            (LlmReasoningMode::Off, Some("none")),
+            (LlmReasoningMode::Light, Some("low")),
+            (LlmReasoningMode::Balanced, Some("medium")),
+            (LlmReasoningMode::Deep, Some("high")),
+        ] {
+            for use_native_search in [false, true] {
+                let config = LlmProviderConfig {
+                    active: "deepseek".to_string(),
+                    custom_model: Some(model.to_string()),
+                    ..LlmProviderConfig::default()
+                };
+                let endpoint = endpoint_for_config(&config);
 
-        let (result, captured) = dispatch_and_capture_with_reasoning(
-            endpoint,
-            "/v1/chat/completions",
-            responses_response("polished"),
-            false,
-            LlmReasoningMode::Off,
-        )
-        .await;
+                let (result, captured) = dispatch_and_capture_with_reasoning(
+                    endpoint,
+                    "/v1/chat/completions",
+                    responses_response("polished"),
+                    use_native_search,
+                    reasoning_mode,
+                )
+                .await;
 
-        assert_eq!(captured.path, "/v1/responses", "model={model}");
-        assert!(captured.body.get("tools").is_none(), "model={model}");
-        assert!(captured.body.get("input").is_some(), "model={model}");
-        assert!(captured.body.get("messages").is_none(), "model={model}");
-        assert_eq!(
-            captured.body["reasoning"]["effort"], "none",
-            "model={model}"
-        );
-        assert_eq!(
-            result.expect("polish Responses payload should parse"),
-            "polished",
-            "model={model}"
-        );
+                let case =
+                    format!("model={model}, mode={reasoning_mode:?}, search={use_native_search}");
+                assert_eq!(captured.path, "/v1/responses", "{case}");
+                if use_native_search {
+                    assert_eq!(
+                        captured.body["tools"],
+                        serde_json::json!([{ "type": "web_search" }]),
+                        "{case}"
+                    );
+                } else {
+                    assert!(captured.body.get("tools").is_none(), "{case}");
+                }
+                assert!(captured.body.get("input").is_some(), "{case}");
+                assert!(captured.body.get("messages").is_none(), "{case}");
+                assert!(captured.body.get("thinking").is_none(), "{case}");
+                if let Some(expected_effort) = expected_effort {
+                    assert_eq!(
+                        captured.body["reasoning"]["effort"], expected_effort,
+                        "{case}"
+                    );
+                } else {
+                    assert!(captured.body.get("reasoning").is_none(), "{case}");
+                }
+                assert_eq!(
+                    result.expect("polish Responses payload should parse"),
+                    "polished",
+                    "{case}"
+                );
+            }
+        }
     }
 }

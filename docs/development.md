@@ -117,7 +117,7 @@ validated route/screen choices, probabilities and whether polishing was skipped.
 `Decision model fallback` records HTTP status, transport, malformed-response or
 timeout failures; these retain normal polishing and do not imply a `polish` decision.
 For example, Vercel's HTTP 403 can indicate unavailable model access, while Liquid's
-HTTP 429 can indicate temporary `d1:free` capacity limits. Decision logs omit transcript
+HTTP 429 can indicate temporary rate or capacity limits. Decision logs omit transcript
 content, request bodies and credentials.
 
 Auto-polish bypass and its automatic screen route use an 80% minimum choice
@@ -149,4 +149,5 @@ verification tools and compiled Lean files are local artifacts. Write them under
 The small evidence summaries and raw counterexample fixtures under `formal/`
 remain versioned so another checkout can reproduce and validate the same inputs.
 
-See [release procedure](releasing.md) and [R2T2 backend](r2t2-native.md).
+See [release procedure](releasing.md), [R2T2 backend](r2t2-native.md) and
+[current API defaults](api-defaults.md).

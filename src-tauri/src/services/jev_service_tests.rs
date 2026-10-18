@@ -238,6 +238,16 @@ fn request_body(request: &reqwest::Request) -> Value {
     .expect("Jev request body should be JSON")
 }
 
+fn assert_no_vercel_sdk_headers(request: &reqwest::Request) {
+    for name in [
+        "ai-model-id",
+        "ai-evaluation-model-specification-version",
+        "ai-gateway-protocol-version",
+    ] {
+        assert!(request.headers().get(name).is_none(), "unexpected {name}");
+    }
+}
+
 fn assert_common_request_contract(request: &reqwest::Request) {
     assert_eq!(request.method(), reqwest::Method::POST);
     assert_eq!(
@@ -314,7 +324,7 @@ fn build_request_matches_typesafe_official_contract() {
         "https://api.typesafe.ai/v1/systemone"
     );
     assert_common_request_contract(&request);
-    assert_eq!(request_body(&request)["model"], json!("jev-1.13.0"));
+    assert_eq!(request_body(&request)["model"], json!("jev-latest"));
 }
 
 #[test]
@@ -338,7 +348,7 @@ fn build_request_matches_openrouter_alpha_contract() {
 }
 
 #[test]
-fn build_request_matches_vercel_evaluation_model_contract() {
+fn build_request_matches_vercel_systemone_contract() {
     let request = jev_service::build_request(
         &reqwest::Client::new(),
         &default_config(JevProvider::Vercel),
@@ -351,38 +361,48 @@ fn build_request_matches_vercel_evaluation_model_contract() {
 
     assert_eq!(
         request.url().as_str(),
-        "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
+        "https://ai-gateway.vercel.sh/typesafe/v1/systemone"
     );
     assert_common_request_contract(&request);
-    assert!(
-        request_body(&request).get("model").is_none(),
-        "Vercel must select Jev through ai-model-id rather than a model body field"
-    );
-    assert_eq!(
-        request
-            .headers()
-            .get(reqwest::header::HeaderName::from_static("ai-model-id"))
-            .and_then(|value: &reqwest::header::HeaderValue| value.to_str().ok()),
-        Some("typesafe-ai/jev")
-    );
-    assert_eq!(
-        request
-            .headers()
-            .get(reqwest::header::HeaderName::from_static(
-                "ai-evaluation-model-specification-version",
-            ))
-            .and_then(|value: &reqwest::header::HeaderValue| value.to_str().ok()),
-        Some("4")
-    );
-    assert_eq!(
-        request
-            .headers()
-            .get(reqwest::header::HeaderName::from_static(
-                "ai-gateway-protocol-version",
-            ))
-            .and_then(|value: &reqwest::header::HeaderValue| value.to_str().ok()),
-        Some("0.0.1")
-    );
+    assert_eq!(request_body(&request)["model"], "typesafe-ai/jev");
+    assert_eq!(request_body(&request).as_object().unwrap().len(), 3);
+    assert_no_vercel_sdk_headers(&request);
+}
+
+#[test]
+fn stored_legacy_vercel_endpoints_keep_the_evaluation_model_transport() {
+    for base_url in [
+        "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
+        "https://ai-gateway.vercel.sh/v4/ai/",
+    ] {
+        let config = configured(JevProvider::Vercel, base_url, "saved/legacy-model");
+        assert_eq!(
+            jev_service::connection_for(&config, JevProvider::Vercel).base_url,
+            base_url
+        );
+        let request = jev_service::build_request(
+            &reqwest::Client::new(),
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            None,
+        )
+        .expect("saved legacy Vercel request should build");
+
+        assert_eq!(
+            request.url().as_str(),
+            "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
+        );
+        assert_common_request_contract(&request);
+        assert!(request_body(&request).get("model").is_none());
+        assert_eq!(request.headers()["ai-model-id"], "saved/legacy-model");
+        assert_eq!(
+            request.headers()["ai-evaluation-model-specification-version"],
+            "4"
+        );
+        assert_eq!(request.headers()["ai-gateway-protocol-version"], "0.0.1");
+    }
 }
 
 #[test]
@@ -403,7 +423,7 @@ fn build_request_matches_liquid_d1_contract() {
         "https://api.liquid.ai/decisions/v1/systemone"
     );
     assert_common_request_contract(&request);
-    assert_eq!(request_body(&request)["model"], json!("d1:free"));
+    assert_eq!(request_body(&request)["model"], json!("d1"));
     assert!(request
         .headers()
         .get(reqwest::header::AUTHORIZATION)
@@ -446,7 +466,7 @@ fn liquid_request_keeps_a_unique_credential_slot_and_provider_path_on_override()
         request.url().as_str(),
         "https://override.example/api/decisions/v1/systemone"
     );
-    assert_eq!(request_body(&request)["model"], json!("d1:free"));
+    assert_eq!(request_body(&request)["model"], json!("d1"));
 }
 
 #[test]
@@ -935,13 +955,13 @@ fn configured(provider: JevProvider, base_url: &str, model: &str) -> JevConfig {
 }
 
 #[test]
-fn legacy_jev_connections_keep_all_provider_defaults_and_empty_map_serialization() {
+fn legacy_jev_profiles_resolve_current_defaults_without_persisting_connections() {
     let expected = [
         (
             JevProvider::TypeSafe,
             "typesafe",
             "https://api.typesafe.ai/v1/systemone",
-            "jev-1.13.0",
+            "jev-latest",
         ),
         (
             JevProvider::OpenRouter,
@@ -952,14 +972,14 @@ fn legacy_jev_connections_keep_all_provider_defaults_and_empty_map_serialization
         (
             JevProvider::Vercel,
             "vercel",
-            "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
+            "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
             "typesafe-ai/jev",
         ),
         (
             JevProvider::Liquid,
             "liquid",
             "https://api.liquid.ai/decisions/v1/systemone",
-            "d1:free",
+            "d1",
         ),
         (JevProvider::Custom, "custom", "", ""),
     ];
@@ -1003,9 +1023,31 @@ fn jev_connection_fields_default_independently_and_resolve_only_the_requested_pr
         },
     );
     let reset = jev_service::connection_for(&config, JevProvider::TypeSafe);
-    assert_eq!(reset.model, "jev-1.13.0");
+    assert_eq!(reset.model, "jev-latest");
     let custom = jev_service::connection_for(&config, JevProvider::Custom);
     assert!(custom.base_url.is_empty() && custom.model.is_empty());
+}
+
+#[test]
+fn explicitly_saved_older_models_remain_selected_after_defaults_change() {
+    for (provider, model) in [
+        (JevProvider::TypeSafe, "jev-1.13.0"),
+        (JevProvider::Liquid, "d1:free"),
+    ] {
+        let config = configured(provider, "", model);
+        assert_eq!(jev_service::connection_for(&config, provider).model, model);
+        let request = jev_service::build_request(
+            &reqwest::Client::new(),
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            None,
+        )
+        .unwrap();
+        assert_eq!(request_body(&request)["model"], model);
+        assert_common_request_contract(&request);
+    }
 }
 
 #[test]
@@ -1097,7 +1139,13 @@ fn configured_jev_endpoints_normalize_provider_roots_without_rewriting_arbitrary
             "/decisions/v1/",
             "/decisions/v1/systemone",
         ),
-        (JevProvider::Vercel, "", "/v4/ai/evaluation-model"),
+        (JevProvider::Vercel, "", "/typesafe/v1/systemone"),
+        (JevProvider::Vercel, "/typesafe", "/typesafe/v1/systemone"),
+        (
+            JevProvider::Vercel,
+            "/typesafe/v1/",
+            "/typesafe/v1/systemone",
+        ),
         (JevProvider::Vercel, "/v4/ai/", "/v4/ai/evaluation-model"),
         (JevProvider::Custom, "", "/v1/systemone"),
         (JevProvider::Custom, "/v1/", "/v1/systemone"),
@@ -1146,7 +1194,7 @@ fn configured_jev_endpoints_normalize_provider_roots_without_rewriting_arbitrary
 }
 
 #[test]
-fn configured_jev_models_keep_the_typed_protocol_and_vercel_version_headers() {
+fn configured_jev_models_keep_the_typed_protocol_at_arbitrary_endpoints() {
     for provider in [
         JevProvider::TypeSafe,
         JevProvider::OpenRouter,
@@ -1175,21 +1223,8 @@ fn configured_jev_models_keep_the_typed_protocol_and_vercel_version_headers() {
             body.get("messages").is_none(),
             "decision protocol must remain structured"
         );
-        if provider == JevProvider::Vercel {
-            assert!(body.get("model").is_none());
-            assert_eq!(
-                request.headers()["ai-model-id"],
-                "organization/future-decision:preview"
-            );
-            assert_eq!(
-                request.headers()["ai-evaluation-model-specification-version"],
-                "4"
-            );
-            assert_eq!(request.headers()["ai-gateway-protocol-version"], "0.0.1");
-        } else {
-            assert_eq!(body["model"], "organization/future-decision:preview");
-            assert!(request.headers().get("ai-model-id").is_none());
-        }
+        assert_eq!(body["model"], "organization/future-decision:preview");
+        assert_no_vercel_sdk_headers(&request);
     }
 }
 
@@ -1214,6 +1249,48 @@ fn jev_endpoint_override_wins_over_stored_url_without_discarding_the_stored_mode
         "http://127.0.0.1:8123/api/alpha/decisions"
     );
     assert_eq!(request_body(&request)["model"], "future-router-model");
+}
+
+#[test]
+fn vercel_endpoint_override_selects_transport_without_discarding_the_saved_model() {
+    let config = configured(
+        JevProvider::Vercel,
+        "https://never-contact.invalid/v4/ai/evaluation-model",
+        "saved/vercel-model",
+    );
+    for (endpoint, expected_path, legacy) in [
+        ("http://127.0.0.1:8123", "/typesafe/v1/systemone", false),
+        (
+            "http://127.0.0.1:8123/typesafe/v1/systemone",
+            "/typesafe/v1/systemone",
+            false,
+        ),
+        (
+            "http://127.0.0.1:8123/v4/ai/evaluation-model",
+            "/v4/ai/evaluation-model",
+            true,
+        ),
+    ] {
+        let request = jev_service::build_request(
+            &reqwest::Client::new(),
+            &config,
+            TEST_API_KEY,
+            ORIGINAL,
+            POLICY_CONTEXT,
+            Some(endpoint),
+        )
+        .unwrap();
+        assert_eq!(request.url().host_str(), Some("127.0.0.1"));
+        assert_eq!(request.url().path(), expected_path);
+        assert_common_request_contract(&request);
+        if legacy {
+            assert!(request_body(&request).get("model").is_none());
+            assert_eq!(request.headers()["ai-model-id"], "saved/vercel-model");
+        } else {
+            assert_eq!(request_body(&request)["model"], "saved/vercel-model");
+            assert_no_vercel_sdk_headers(&request);
+        }
+    }
 }
 
 #[test]
@@ -1333,4 +1410,50 @@ async fn configured_custom_gate_sends_a_real_loopback_request_without_endpoint_o
     assert_eq!(captured.path, "/Typed/Decision");
     assert_eq!(captured.body["model"], "local-decider");
     assert_eq!(captured.body["state"]["text"], ORIGINAL);
+}
+
+#[tokio::test]
+async fn vercel_default_transport_sends_typed_state_and_accepts_a_choice_response() {
+    let response = br#"{"answers":{"route":{"type":"choice","choice":"pass","probabilities":{"pass":0.95,"polish":0.04,"uncertain":0.01}}}}"#;
+    let (endpoint, server) = spawn_json_server("200 OK", response).await;
+    let config = configured(JevProvider::Vercel, &endpoint, "");
+    let should_skip = jev_service::evaluate(
+        &reqwest::Client::new(),
+        &config,
+        TEST_API_KEY,
+        ORIGINAL,
+        POLICY_CONTEXT,
+        None,
+    )
+    .await;
+    let captured = timeout(Duration::from_secs(2), server)
+        .await
+        .expect("Vercel request should reach the loopback server")
+        .expect("loopback server should finish");
+
+    assert!(
+        should_skip,
+        "typed Choice pass should retain the skip decision"
+    );
+    assert_eq!(captured.method, "POST");
+    assert_eq!(captured.path, "/typesafe/v1/systemone");
+    assert_eq!(
+        captured.body,
+        json!({
+            "model": "typesafe-ai/jev",
+            "state": {"text": ORIGINAL, "polishing_policy": POLICY_CONTEXT},
+            "questions": jev_service::route_questions(),
+        })
+    );
+    assert_eq!(
+        header_value(&captured.headers, "authorization").as_deref(),
+        Some("Bearer jev-test-key")
+    );
+    for name in [
+        "ai-model-id",
+        "ai-evaluation-model-specification-version",
+        "ai-gateway-protocol-version",
+    ] {
+        assert!(header_value(&captured.headers, name).is_none());
+    }
 }

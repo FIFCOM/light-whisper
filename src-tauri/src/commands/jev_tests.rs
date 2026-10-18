@@ -234,7 +234,7 @@ fn jev_connection_reset_retains_independent_other_provider_configuration() {
     let resolved =
         crate::services::jev_service::connection_for(&profile.jev, JevProvider::TypeSafe);
     assert_eq!(resolved.base_url, "https://api.typesafe.ai/v1/systemone");
-    assert_eq!(resolved.model, "jev-1.13.0");
+    assert_eq!(resolved.model, "jev-latest");
     assert_eq!(
         profile.jev.connections[&JevProvider::Custom].model,
         "future-model"

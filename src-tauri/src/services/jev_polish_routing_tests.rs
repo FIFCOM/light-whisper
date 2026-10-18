@@ -69,7 +69,7 @@ async fn unavailable_vercel_or_liquid_keeps_polish_and_screen_without_retry() {
         (
             JevProvider::Vercel,
             "403 Forbidden",
-            "/v4/ai/evaluation-model",
+            "/typesafe/v1/systemone",
         ),
         (
             JevProvider::Liquid,
@@ -102,7 +102,7 @@ async fn unavailable_vercel_or_liquid_keeps_polish_and_screen_without_retry() {
         assert_eq!(captured.path, path);
         assert_eq!(question_ids(&captured.body), vec!["route", "screen"]);
         if provider == JevProvider::Liquid {
-            assert_eq!(captured.body["model"], "d1:free");
+            assert_eq!(captured.body["model"], "d1");
         }
     }
 }

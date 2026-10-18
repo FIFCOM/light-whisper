@@ -10,6 +10,7 @@ use crate::state::user_profile::{JevConfig, JevConnection};
 use crate::services::llm_provider::KEYRING_SERVICE;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(1000);
+const LEGACY_VERCEL_PATH: &str = "/v4/ai/evaluation-model";
 /// Minimum probability for auto-polish bypass and its automatic screen route.
 pub const POLISH_ROUTING_MIN_PROBABILITY: f64 = 0.80;
 // Jev returns a probability for each of the three route choices. The API may
@@ -22,7 +23,7 @@ impl JevProvider {
         match self {
             Self::TypeSafe => "https://api.typesafe.ai/v1/systemone",
             Self::OpenRouter => "https://openrouter.ai/api/alpha/decisions",
-            Self::Vercel => "https://ai-gateway.vercel.sh/v4/ai/evaluation-model",
+            Self::Vercel => "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
             Self::Liquid => "https://api.liquid.ai/decisions/v1/systemone",
             Self::Custom => "",
         }
@@ -30,10 +31,10 @@ impl JevProvider {
 
     fn model(self) -> &'static str {
         match self {
-            Self::TypeSafe => "jev-1.13.0",
+            Self::TypeSafe => "jev-latest",
             Self::OpenRouter => "typesafe/jev-1.13",
             Self::Vercel => "typesafe-ai/jev",
-            Self::Liquid => "d1:free",
+            Self::Liquid => "d1",
             Self::Custom => "",
         }
     }
@@ -42,7 +43,7 @@ impl JevProvider {
         match self {
             Self::TypeSafe => "/v1/systemone",
             Self::OpenRouter => "/api/alpha/decisions",
-            Self::Vercel => "/v4/ai/evaluation-model",
+            Self::Vercel => "/typesafe/v1/systemone",
             Self::Liquid => "/decisions/v1/systemone",
             Self::Custom => "/v1/systemone",
         }
@@ -152,9 +153,9 @@ pub fn route_questions() -> Value {
 fn override_endpoint_for(provider: JevProvider, endpoint: &str) -> String {
     let trimmed = endpoint.trim_end_matches('/');
     let path = provider.path();
-    if trimmed
-        .to_ascii_lowercase()
-        .ends_with(&path.to_ascii_lowercase())
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.ends_with(&path.to_ascii_lowercase())
+        || (provider == JevProvider::Vercel && lower.ends_with(LEGACY_VERCEL_PATH))
     {
         trimmed.to_string()
     } else {
@@ -166,10 +167,14 @@ fn endpoint_for(provider: JevProvider, base_url: &str) -> Result<String, String>
     let mut url = reqwest::Url::parse(base_url)
         .map_err(|_| "Decision model API URL is invalid".to_string())?;
     let path = url.path().trim_end_matches('/');
+    if provider == JevProvider::Vercel && path == "/v4/ai" {
+        url.set_path(LEGACY_VERCEL_PATH);
+        return Ok(url.to_string());
+    }
     let provider_root = match provider {
         JevProvider::TypeSafe | JevProvider::Custom => path == "/v1",
         JevProvider::OpenRouter => matches!(path, "/api" | "/api/v1"),
-        JevProvider::Vercel => path == "/v4/ai",
+        JevProvider::Vercel => matches!(path, "/typesafe" | "/typesafe/v1"),
         JevProvider::Liquid => matches!(path, "/decisions" | "/decisions/v1"),
     };
     if path.is_empty() || provider_root {
@@ -207,8 +212,10 @@ pub fn build_evaluation_request(
     } else {
         endpoint_for(provider, &connection.base_url)?
     };
+    let legacy_vercel = provider == JevProvider::Vercel
+        && endpoint.to_ascii_lowercase().ends_with(LEGACY_VERCEL_PATH);
     let mut body = serde_json::Map::new();
-    if provider != JevProvider::Vercel {
+    if !legacy_vercel {
         body.insert("model".to_string(), json!(connection.model));
     }
     body.insert("state".to_string(), state);
@@ -222,7 +229,7 @@ pub fn build_evaluation_request(
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-    if provider == JevProvider::Vercel {
+    if legacy_vercel {
         headers.insert(
             HeaderName::from_static("ai-model-id"),
             HeaderValue::from_str(&connection.model).map_err(|_| {

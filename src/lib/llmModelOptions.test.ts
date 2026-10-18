@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { findLlmPreset, isFixedPresetProvider, llmProviderOptions } from "./llmModelOptions";
+import { findLlmPreset, isFixedPresetProvider, llmProviderOptions, resolveLlmModel } from "./llmModelOptions";
 
 describe("DeepSeek model options", () => {
-  it("offers only the currently supported built-in models for new configurations", () => {
+  it("defaults new configurations to canonical Flash and retains the previous model choices", () => {
     const deepseek = llmProviderOptions.find((option) => option.key === "deepseek");
 
-    expect(deepseek?.models).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    expect(deepseek?.models).toEqual(["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"]);
+    expect(deepseek?.defaultModel).toBe("deepseek-flash");
+    expect(resolveLlmModel("deepseek")).toBe("deepseek-flash");
+  });
+
+  it("preserves explicitly saved DeepSeek model choices", () => {
+    for (const model of ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner", "deepseek-future"]) {
+      expect(resolveLlmModel("deepseek", model)).toBe(model);
+    }
   });
 });
 
@@ -19,8 +27,8 @@ describe("xAI Grok provider preset", () => {
       label: "xAI Grok",
       descKey: "settings.xaiDesc",
       baseUrl: "https://api.x.ai",
-      defaultModel: "grok-4.6",
-      models: ["grok-4.6", "grok-4.5", "grok-build-0.1", "grok-composer-2.5-fast"],
+      defaultModel: "grok-4.7",
+      models: ["grok-4.7", "grok-4.6", "grok-4.5", "grok-build-0.1", "grok-composer-2.5-fast"],
     });
     expect(isFixedPresetProvider("xai")).toBe(true);
     expect(findLlmPreset("xai")).toEqual(xai);
@@ -39,12 +47,44 @@ describe("xAI Grok provider preset", () => {
 });
 
 describe("OpenAI provider preset", () => {
-  it("keeps the existing default and gets model choices from the live catalog", () => {
+  it("defaults to Luna and gets model choices from the live catalog", () => {
     const openai = findLlmPreset("openai");
 
-    expect(openai.defaultModel).toBe("gpt-4.1-mini");
+    expect(openai.defaultModel).toBe("gpt-6-luna");
     expect(openai.models).toEqual([]);
     expect(isFixedPresetProvider("openai")).toBe(true);
+  });
+});
+
+describe("current provider model defaults", () => {
+  it.each([
+    ["cerebras", "qwen-3.8-27b", ["qwen-3.8-27b", "gpt-oss-120b"]],
+    ["siliconflow", "Qwen/Qwen3.8-27B", ["Qwen/Qwen3.8-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]],
+  ] as const)("uses the current %s default and fallback model list", (provider, model, models) => {
+    const preset = findLlmPreset(provider);
+
+    expect(preset.defaultModel).toBe(model);
+    expect(preset.models).toEqual(models);
+    expect(resolveLlmModel(provider)).toBe(model);
+  });
+
+  it("preserves explicit model choices for every provider", () => {
+    for (const [provider, model] of [
+      ["openai", "gpt-4.1-mini"],
+      ["xai", "grok-4.6"],
+      ["cerebras", "gpt-oss-20b"],
+      ["siliconflow", "Qwen/Qwen3-32B"],
+      ["custom-gateway", "saved-model"],
+    ]) {
+      expect(resolveLlmModel(provider, model)).toBe(model);
+    }
+  });
+
+  it("uses the OpenAI default for empty custom model selections", () => {
+    for (const provider of ["custom", "custom-gateway"]) {
+      expect(resolveLlmModel(provider)).toBe("gpt-6-luna");
+      expect(resolveLlmModel(provider, " ")).toBe("gpt-6-luna");
+    }
   });
 });
 

@@ -35,7 +35,7 @@ pub(crate) fn uses_deepseek_v4_responses(endpoint: &LlmEndpoint) -> bool {
         && endpoint.provider == "deepseek"
         && matches!(
             endpoint.model.as_str(),
-            "deepseek-v4-flash" | "deepseek-v4-pro"
+            "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-pro"
         )
 }
 

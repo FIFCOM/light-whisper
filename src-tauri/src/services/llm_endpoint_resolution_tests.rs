@@ -10,32 +10,32 @@ const PRESETS: &[(&str, &str, &str, u64)] = &[
     (
         "cerebras",
         "https://api.cerebras.ai/v1/chat/completions",
-        "gpt-oss-120b",
+        "qwen-3.8-27b",
         5,
     ),
     (
         "openai",
         "https://api.openai.com/v1/responses",
-        "gpt-4.1-mini",
+        "gpt-6-luna",
         10,
     ),
-    ("xai", "https://api.x.ai/v1/responses", "grok-4.6", 10),
+    ("xai", "https://api.x.ai/v1/responses", "grok-4.7", 10),
     (
         "deepseek",
         "https://api.deepseek.com/v1/chat/completions",
-        "deepseek-v4-flash",
+        "deepseek-flash",
         10,
     ),
     (
         "siliconflow",
         "https://api.siliconflow.cn/v1/chat/completions",
-        "Qwen/Qwen3-32B",
+        "Qwen/Qwen3.8-27B",
         10,
     ),
     (
         "custom",
         "http://127.0.0.1:8000/v1/chat/completions",
-        "gpt-4.1-mini",
+        "gpt-6-luna",
         10,
     ),
 ];
@@ -220,7 +220,7 @@ fn blank_custom_entry_models_use_the_default_instead_of_stale_legacy_models() {
             };
             assert_endpoint(
                 endpoint_for_config(&config),
-                ("custom_a", url, "gpt-4.1-mini", timeout, format.clone()),
+                ("custom_a", url, "gpt-6-luna", timeout, format.clone()),
             );
         }
     }
