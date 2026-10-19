@@ -60,7 +60,7 @@ Decision APIs return typed probabilities and are separate from Responses.
 | Provider | Default model | Request URL | Official source |
 | --- | --- | --- | --- |
 | TypeSafe | `jev-latest` | `https://api.typesafe.ai/v1/systemone` | [Stable alias; currently Jev 1.13](https://docs.typesafe.ai/models) |
-| OpenRouter | `typesafe/jev-1.13` | `https://openrouter.ai/api/alpha/decisions` | [Current stable integration example](https://openrouter.ai/blog/tutorials/how-to-use-jev/) |
+| OpenRouter | `~typesafe/jev-latest` | `https://openrouter.ai/api/alpha/decisions` | [Current stable integration example](https://openrouter.ai/blog/tutorials/how-to-use-jev/) |
 | Vercel | `typesafe-ai/jev` | `https://ai-gateway.vercel.sh/typesafe/v1/systemone` | [Public TypeSafe-compatible API](https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe) |
 | Liquid | `d1` | `https://api.liquid.ai/decisions/v1/systemone` | [Current D1 API](https://docs.liquid.ai/lfm/models/d1) |
 
