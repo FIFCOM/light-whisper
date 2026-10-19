@@ -731,7 +731,7 @@
       "assumptions": "Driver initialization can take time and must observe cancellation; the property guards publication, not an instantaneous hardware shutdown guarantee. Two independent microphone test requests with out-of-order success/failure, one intent retirement and serialized stop/start/compensation phases. Native stop eventually settles; physical instantaneous shutdown is not asserted. A second companion separates two hook instances, a shared native-operation queue, late first start compensation and retired test completion; global native ownership prevents retired cleanup from stopping its replacement."
     },
     "engine": {
-      "obligation": "Engine/directory changes respect busy capture/download; late starts cannot publish; cloud readiness uses its captured key slot. Present invalid completion metadata is authoritative corrupt state even with a large weight; absent metadata retains legacy compatibility; corrupt/missing status offers explicit repair, and a verified repair becomes ready.",
+      "obligation": "Engine/directory changes respect busy capture/download; late starts cannot publish; cloud readiness uses its captured key slot. Present invalid completion metadata is authoritative corrupt state even with a large weight; absent metadata retains legacy compatibility; corrupt/missing status offers explicit repair, and a verified repair becomes ready. Concurrent engine.json field updates preserve committed independent fields and release the transaction after failure.",
       "models": {
         "AsyncSettings": [
           "NoPostUnmountPublication"
@@ -753,6 +753,12 @@
           "CorruptAlwaysOffersRepair",
           "LegacyAbsentManifestStillWorks",
           "ReadyAfterExplicitRepair"
+        ],
+        "EngineConfigurationWrites": [
+          "CommittedUpdatesPreserved",
+          "UnknownFieldsPreserved",
+          "OwnerMatchesActiveTransaction",
+          "TransactionsSettle"
         ]
       },
       "implementation": [
@@ -762,7 +768,8 @@
         "src-tauri/src/services/glm_asr_service.rs",
         "src/hooks/useModelStatus.ts",
         "src-tauri/resources/hf_cache_utils.py",
-        "src-tauri/resources/download_models.py"
+        "src-tauri/resources/download_models.py",
+        "src-tauri/src/utils/paths.rs#fn update_engine_json("
       ],
       "evidence": [
         "src-tauri/src/commands/funasr.rs",
@@ -771,9 +778,10 @@
         "scripts/check_request_snapshot.py",
         "src-tauri/resources/test_async_ownership_replay.py",
         "src-tauri/resources/test_model_integrity_regression.py",
-        "formal/evidence/async-ownership.md"
+        "formal/evidence/async-ownership.md",
+        "src-tauri/src/utils/paths_concurrency_tests.rs"
       ],
-      "assumptions": "Four engine classes; model output correctness and filesystem/driver/network primitives are outside proof. Ready/error values are environmental inputs. Cache integrity companion partitions absent/valid/invalid manifest and absent/large weights. A positive trace witness reaches repair completion; this reachability target is deliberately false and is not a safety proof. Actual replay calls cache resolvers and explicit download_model verification/atomic manifest publication on temporary local bytes; no GPU/model inference internals are claimed."
+      "assumptions": "Four engine classes; model output correctness and filesystem/driver/network primitives are outside proof. Ready/error values are environmental inputs. Cache integrity companion partitions absent/valid/invalid manifest and absent/large weights. A positive trace witness reaches repair completion; this reachability target is deliberately false and is not a safety proof. Actual replay calls cache resolvers and explicit download_model verification/atomic manifest publication on temporary local bytes; no GPU/model inference internals are claimed. Configuration writes are within one application process; four independent fields and atomic replacement success/failure are modeled. External writers and arbitrary filesystem durability are outside the mutex contract."
     },
     "download": {
       "obligation": "A cancelled download retains ownership/configuration until worker termination; cleanup cannot release a newer task; cancellation/unmount revoke frontend timers and old asynchronous callbacks.",
@@ -872,7 +880,7 @@
       "assumptions": "Identity-provider authentication and cryptography are trusted; generation counters must not wrap; storage durability is a separate obligation."
     },
     "keys": {
-      "obligation": "Failed keyring write/delete is returned before publishing runtime caches; missing deletes are idempotent; saves, lazy loads and startup restore serialize storage and cache publication. Assistant delayed edits and retry retain captured provider; actual writes serialize; newest provider/read/edit ownership controls read publication.",
+      "obligation": "Failed keyring write/delete is returned before publishing runtime caches; missing deletes are idempotent; saves, lazy loads and startup restore serialize storage and cache publication. Assistant delayed edits and retry retain captured provider; actual writes serialize; newest provider/read/edit ownership controls read publication. Polish credential reads never write storage; edits capture their provider and retain dirty drafts across switches and failed saves. Retired reads cannot publish.",
       "models": {
         "SettingsContracts": [
           "KeyWrite",
@@ -917,9 +925,12 @@
         "src-tauri/src/state/web_search_key_tests.rs",
         "scripts/check_request_snapshot.py",
         "src/pages/__tests__/SettingsPageProviderDiscovery.test.tsx#TLC assistant credential replay",
-        "formal/evidence/async-ownership.md"
+        "formal/evidence/async-ownership.md",
+        "src-tauri/src/commands/polish_credential_tests.rs",
+        "src/pages/__tests__/SettingsPageProviderDiscovery.test.tsx#SettingsPage polish credential ownership",
+        "src/api/__tests__/tauri.test.ts"
       ],
-      "assumptions": "Single keyring operations are atomic; physical OAuth multi-store commits are modeled separately. Getter failure is an unavailable credential, never proof of deletion. Companion model bounds two edits, two provider switches, two independent reads, success/failure and one retry per edit. UI/keyring promises and provider callbacks are checked with actual SettingsPage fixtures; native keyring internals are trusted. Read eligibility snapshots both the dirty draft and request/edit ownership: failed writes retain drafts; only matching successful writes clear them; a read started while dirty cannot become publishable after that clearing. Initial hydration is outside the companion; each provider switch captures a read before subsequent edits or matching save-clear transitions."
+      "assumptions": "Single keyring operations are atomic; physical OAuth multi-store commits are modeled separately. Getter failure is an unavailable credential, never proof of deletion. Companion model bounds two edits, two provider switches, two independent reads, success/failure and one retry per edit. UI/keyring promises and provider callbacks are checked with actual SettingsPage fixtures; native keyring internals are trusted. Read eligibility snapshots both the dirty draft and request/edit ownership: failed writes retain drafts; only matching successful writes clear them; a read started while dirty cannot become publishable after that clearing. Initial hydration is outside the companion; each provider switch captures a read before subsequent edits or matching save-clear transitions. The same abstract editor ownership machine applies independently to polish and assistant editors; cross-editor last-write ordering is supplied by keyring primitives. Initial profile hydration is tested in the implementation, not added to this companion model."
     },
     "profile-save": {
       "obligation": "Each profile update queues its own current version under the same ordering lock; settled disk is latest.",
@@ -1358,13 +1369,19 @@
       "assumptions": "GitHub release metadata and parsed version components are input partitions; numeric comparison is not a SemVer compliance claim."
     },
     "ui-preferences": {
-      "obligation": "Theme follows system only in system mode; autostart reports success only after an authoritative confirmation.",
+      "obligation": "Theme follows system only in system mode; autostart reports success only after an authoritative confirmation. Mounted theme consumers agree; system changes preserve manual choices and delivered storage preferences synchronize windows.",
       "models": {
         "UiPreferences": [
           "ThemeResolvesCorrectly",
           "NoUnconfirmedAutostartSuccess",
           "ConfirmedAutostartMatchesPlugin",
           "ToggleEventuallySettles"
+        ],
+        "ThemeSynchronization": [
+          "ManualPreferenceRetained",
+          "SystemPreferenceRespected",
+          "CurrentSubscribersConsistent",
+          "DeliveredWindowsMatchStorage"
         ]
       },
       "implementation": [
@@ -1379,9 +1396,10 @@
         "src/pages/__tests__/SettingsPageExportPath.test.tsx",
         "src-tauri/src/lib.rs#fn autostart_minimized_requires_both_the_preference_and_login_argument(",
         "src-tauri/src/state/user_profile.rs#fn autostart_minimized_defaults_off_for_legacy_profiles_and_round_trips(",
-        "formal/lean/StateContracts.lean"
+        "formal/lean/StateContracts.lean",
+        "src/hooks/useTheme.test.tsx"
       ],
-      "assumptions": "localStorage/media query/Tauri autostart are platform primitives; visuals/accessibility need UI tests. Failed initial autostart read does not establish a known value. The optional tray startup preference is bound to the abstract preference/profile contracts; login-argument and legacy-default behavior have implementation tests, not a proof of native Windows startup."
+      "assumptions": "localStorage/media query/Tauri autostart are platform primitives; visuals/accessibility need UI tests. Failed initial autostart read does not establish a known value. The optional tray startup preference is bound to the abstract preference/profile contracts; login-argument and legacy-default behavior have implementation tests, not a proof of native Windows startup. ThemeSynchronization bounds two windows with two mounted consumers, coalesces delivery to the latest stored preference and applies the DOM atomically. Animation, storage exceptions and unmount cleanup use real hook regressions; there is no delivery liveness or source refinement claim."
     },
     "gpu-idle": {
       "obligation": "Enabling at startup or runtime starts an idle window; no unload during commands or native streams; readiness survives suspension; successful next commands reload; stale initial settings reads cannot overwrite edits.",
@@ -1558,6 +1576,12 @@
     ],
     "ModelIntegrityRepair": [
       "ModelIntegrityRepair.cfg"
+    ],
+    "EngineConfigurationWrites": [
+      "EngineConfigurationWrites.cfg"
+    ],
+    "ThemeSynchronization": [
+      "ThemeSynchronization.cfg"
     ]
   },
   "actions": {
@@ -2142,6 +2166,18 @@
       "model": "AssistantCredentialOwnership",
       "config": "AssistantCredentialSavedReadNegative.cfg",
       "invariant": "OnlyLatestReadPublishes"
+    },
+    {
+      "name": "engine-configuration-lost-update",
+      "model": "EngineConfigurationWrites",
+      "config": "EngineConfigurationWritesNegative.cfg",
+      "invariant": "CommittedUpdatesPreserved"
+    },
+    {
+      "name": "theme-stale-system-observer",
+      "model": "ThemeSynchronization",
+      "config": "ThemeSynchronizationNegative.cfg",
+      "invariant": "ManualPreferenceRetained"
     }
   ],
   "command_implementation": {
@@ -2197,9 +2233,9 @@
     "commands::audio::stop_microphone_level_monitor": "src-tauri/src/commands/audio.rs#fn stop_microphone_level_monitor(",
     "commands::audio::set_input_method": "src-tauri/src/commands/audio.rs#fn set_input_method(",
     "commands::audio::set_sound_enabled": "src-tauri/src/commands/audio.rs#fn set_sound_enabled(",
-    "commands::ai_polish::set_ai_polish_config": "src-tauri/src/commands/ai_polish.rs#fn set_ai_polish_config(",
-    "commands::ai_polish::get_ai_polish_api_key": "src-tauri/src/commands/ai_polish.rs#fn get_ai_polish_api_key(",
-    "commands::ai_polish::set_ai_polish_api_key": "src-tauri/src/commands/ai_polish.rs#fn set_ai_polish_api_key(",
+    "commands::ai_polish::set_ai_polish_config": "src-tauri/src/commands/ai_polish.rs#fn set_ai_polish_config<",
+    "commands::ai_polish::get_ai_polish_api_key": "src-tauri/src/commands/ai_polish.rs#fn get_ai_polish_api_key<",
+    "commands::ai_polish::set_ai_polish_api_key": "src-tauri/src/commands/ai_polish.rs#fn set_ai_polish_api_key<",
     "commands::ai_polish::set_assistant_api_key": "src-tauri/src/commands/ai_polish.rs#fn set_assistant_api_key(",
     "commands::ai_polish::get_assistant_api_key": "src-tauri/src/commands/ai_polish.rs#fn get_assistant_api_key(",
     "commands::ai_polish::set_ai_polish_screen_context_enabled": "src-tauri/src/commands/ai_polish.rs#fn set_ai_polish_screen_context_enabled(",

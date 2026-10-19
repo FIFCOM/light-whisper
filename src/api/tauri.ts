@@ -185,16 +185,20 @@ export function setSoundEnabled(enabled: boolean): Promise<void> {
   return invokeCommand<void>("set_sound_enabled", { enabled });
 }
 
-export function setAiPolishConfig(enabled: boolean, apiKey: string): Promise<void> {
-  return invokeCommand<void>("set_ai_polish_config", { enabled, apiKey });
+export function setAiPolishConfig(enabled: boolean, apiKey?: string, provider?: string): Promise<void> {
+  return invokeCommand<void>("set_ai_polish_config", {
+    enabled,
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(provider === undefined ? {} : { provider }),
+  });
 }
 
-export function getAiPolishApiKey(): Promise<string> {
-  return invokeCommand<string>("get_ai_polish_api_key");
+export function getAiPolishApiKey(provider?: string): Promise<string> {
+  return invokeCommand<string>("get_ai_polish_api_key", provider === undefined ? undefined : { provider });
 }
 
-export function saveAiPolishApiKey(apiKey: string): Promise<void> {
-  return invokeCommand<void>("set_ai_polish_api_key", { apiKey });
+export function saveAiPolishApiKey(apiKey: string, provider?: string): Promise<void> {
+  return invokeCommand<void>("set_ai_polish_api_key", { apiKey, ...(provider === undefined ? {} : { provider }) });
 }
 
 export function setJevProvider(provider: JevProvider): Promise<void> {

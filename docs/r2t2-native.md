@@ -38,7 +38,7 @@ in [R2T2-MODEL-LICENSE.txt](../src-tauri/resources/R2T2-MODEL-LICENSE.txt).
 
 Follow [Development](development.md) to build the two native packages and the installer. Native builds require Visual Studio 2022 C++ tools, CMake and Ninja; CUDA builds were validated with CUDA 12.9 and MSVC 14.44.
 
-The build pins audio.cpp revision `6c70f32d0d90a29a9863e556bd9712ce622f868b` and requires an exact match to `scripts/patches/audio-cpp-r2t2-windows-streaming.patch`. Build `light-whisper-asr-10` writes libraries, licenses and SHA-256 manifests to ignored `src-tauri/resources/r2t2-native/{cpu,cuda}/`. CUDA targets architectures 75, 80, 86, 89 and 90.
+The build pins audio.cpp revision `6c70f32d0d90a29a9863e556bd9712ce622f868b` and requires an exact match to `scripts/patches/audio-cpp-r2t2-windows-streaming.patch`. Build `light-whisper-asr-11` writes libraries, licenses and SHA-256 manifests to ignored `src-tauri/resources/r2t2-native/{cpu,cuda}/`. CUDA targets architectures 75, 80, 86, 89 and 90.
 
 The engine builder validates both manifests and shares byte-identical CUDA/CRT DLLs in `_internal` when a root copy exists. Otherwise, dependencies stay beside the native library. Shared files are listed in each copied manifest. Standalone native packages retain their dependencies. Only CPU/CUDA native directories enter the engine; copied legacy Vulkan DLLs are removed before compression, and reused archives containing Vulkan libraries or retired transcribe.cpp packages are rejected. Model weights are not bundled.
 
@@ -171,6 +171,28 @@ The real CPU regression covers 141 observations across three FFT/hop/mel configu
 
 An additional eight-process ABBA/BAAB CUDA comparison isolates this frontend change against retained prefix reuse. All 96 streams match the reference exactly. Total native processing medians are 1,324.96 / 1,326.17 ms for Chinese, 3,416.75 / 3,379.67 ms for English, and 12,044.69 / 11,981.90 ms for repeated 36-second Chinese. Short Chinese is effectively flat; English reverses direction between rounds. Long-stream round ratios are 0.980 and 0.999, with a 0.52% aggregate reduction. These small differences do not establish uniform whole-ASR acceleration. The repeated CPU-stage gain is retained; no repeatable whole-native latency regression was observed. Real CUDA 13-case/508-feed traces, eight forced-language/mixed/VAD scenarios with 729 feeds, and CPU R2T2/Qwen public outputs remain exact. First-caption audio positions are unchanged. Per-round first-caption accumulated-compute ratios are 1.000/0.983 for English and 0.996/0.986 for the long Chinese replay. Short Chinese adds 1.24/0.65 ms per round; this small effect remains unresolved with the available independent process blocks. These unpaced measurements do not establish unchanged microphone-to-screen latency.
 
+### Temporal draft verification
+
+Build `light-whisper-asr-11` retains three further changes at the existing model precision and audio feed boundaries:
+
+- The reusable greedy decoder looks up only text embeddings; audio rows already have injected embeddings. It caches the latest text-ID sequence and its embeddings, publishing a refresh only after every lookup succeeds.
+- CUDA KV suffix clears queue all layer memsets on the owning backend stream and synchronize once. An optional registry hook leaves the original synchronous clear available to CPU and backends without the hook. Rejected and unused rows are still zeroed, including old non-finite values.
+- The previous prompt tail and generated token IDs supply a draft only when the current tail is their exact token prefix. Full four-token blocks are verified against the current prefill prediction and causal KV state. Each token retains the serial arithmetic shapes; graph scheduling groups matrix products by their shared weight tensor. Only the verified prefix enters the output and cache. A mismatch, small token budget, insufficient cache capacity or short draft uses ordinary serial decoding. EOS terminates the draft before verification, including when a shorter prompt exposes an EOS ID from the previous prompt tail. Failed verification drains uploads, restores the previous cache boundary and reinitializes the decode mask.
+
+Dense multi-query verification changed a live punctuation boundary in the CUDA regression and was rejected. Scalar layer-major scheduling preserved outputs but made whole inference slower; grouping by weight avoids that measured regression. Rounding early prefill lengths to graph buckets was also rejected because it changed valid numerical traces. No preset speed percentage determines retention.
+
+The retained CPU guards compare frozen asr10 arithmetic with real production owners and distinguish numerical equivalence from eliminated work. Prompt lookup covers 96 generations, 44 guards and four failed refreshes; lookup work falls from 212 to 72 graphs and from 7,616 to 2,364 rows. KV clear covers 23 cases, four invalid requests and an injected callback failure. Temporal verification covers 127 F32/F16/BF16 observations, 57 guards and 12 failure recoveries, plus 71 greedy integration calls. The latter preserve the original 68-call trace and add three EOS-tail transitions. Synthetic numerical traces match byte-for-byte; synthetic work counts are not model latency measurements. The final CUDA package also retains exact 13-case/508-feed and 8-case/729-feed context, mixed-language and product-VAD traces. Real CPU R2T2 and Qwen public outputs match the asr10 package.
+
+The combined final package was measured against the original asr10 DLL on the RTX 4070 SUPER in eight sequential fresh processes, with ABBA then BAAB order. Each process warms all three cases and runs three measured sweeps: 24 warmup and 72 measured streams, all exact. Timings accumulate native start/feed/finish calls and exclude model loading, recording duration, VAD, IPC, rendering and AI polish.
+
+| Recording | asr10 pooled median | asr11 pooled median | Pooled reduction | ABBA / BAAB reductions |
+|:--|--:|--:|--:|--:|
+| Chinese, 4.20 s | 1,364.84 ms | 1,261.59 ms | 7.56% | 6.51% / 5.90% |
+| English, 10.56 s | 3,398.63 ms | 3,113.59 ms | 8.39% | 8.64% / 7.24% |
+| Repeated Chinese, 36 s | 12,062.84 ms | 11,338.11 ms | 6.01% | 5.51% / 5.52% |
+
+Both orders favor asr11 in every case. Clock variation between rounds makes the within-round comparisons preferable for the size of the effect; pooled medians are also shown for reproducibility. First-caption audio positions remain 15,360 Chinese / 28,160 English samples. First-caption accumulated compute improves by 1.4–4.0% across the six case/order combinations, and every feed-p95 comparison improves. These results measure the combined changes on these fixtures; they neither isolate each component's GPU contribution nor establish broad CER/WER parity, microphone-to-screen latency or a theoretical speed limit. An earlier mixed-object prompt experiment was invalidated after a rollback timestamp audit; only the clean rebuilt final package supplies the figures above.
+
 ## Reproduce checks
 
 `scripts/benchmark_r2t2_startup.py` takes explicit model, library, dependency-directory and PCM16 WAV paths. Save a baseline with `--output baseline.json`, then test a candidate with `--baseline baseline.json`. It compares committed traces and final text, including silence, resets and short recordings. `--max-first-audio-seconds` checks audio position, excluding compute time.
@@ -197,6 +219,14 @@ python scripts/test_r2t2_prefill.py --source build/r2t2/source --libraries build
 For real-model timing, `scripts/benchmark_r2t2_prefill.py` takes `--baseline-library`, `--candidate-library`, `--model`, `--dependencies`, `--reference`, `--zh-wav`, `--en-wav` and a new `--output-dir`. Use the frozen 13-scenario/508-push reference from `test_r2t2_native_cache.py`, `--rounds 2 --repeats 3 --order ABBA`, and idle other compilation/inference. It preloads the same CUDA dependencies in separate resident-model workers, alternates ABBA/BAAB order, checks every replay against the reference and saves raw timings, hashes and GPU snapshots. Independent process blocks and complete recordings are the repeated measurements; individual feeds are correlated.
 
 The queued-upload lifetime/work guard and exact-prefix guard use the same CPU source/libraries arguments with `scripts/test_r2t2_prefill_async.py` and `scripts/test_r2t2_prefix_reuse.py`. Their `--baseline` is the frozen asr9 runtime with LF SHA-256 `e846316ce0953f9311479bb8083fea09d1917ea1541b0f05ddd3cdc912e54bd0`, retained before applying the asr10 patch. To reconstruct it, apply the patch from project commit `47064e24525b36b4b539d2c95cd6ab9d316931ab` to a separate checkout of the pinned audio.cpp revision. Each runner checks exact arithmetic against that baseline and requires the baseline to fail its separate work criterion. `--no-build` verifies compiled input and executable fingerprints before replaying.
+
+The asr11 guards take `--baseline-root` pointing to a separate pinned audio.cpp tree with the patch from project commit `c64c7f136049037c4186e831a9ac88af4287e5bd` applied. Each runner pins the relevant asr10 owners, records raw input and executable hashes, and requires numerical GREEN with a separate work RED from the baseline:
+
+```powershell
+python scripts/test_r2t2_prompt_embeddings.py --source build/r2t2/source --libraries build/r2t2/cpu --baseline-root build/r2t2/asr10-source --build-dir build/native-tests/r2t2-prompt
+python scripts/test_r2t2_kv_clear.py --source build/r2t2/source --libraries build/r2t2/cpu --baseline-root build/r2t2/asr10-source --build-dir build/native-tests/r2t2-kv-clear
+python scripts/test_r2t2_temporal_verify.py --source build/r2t2/source --libraries build/r2t2/cpu --baseline-root build/r2t2/asr10-source --build-dir build/native-tests/r2t2-temporal
+```
 
 The same asr9 checkout supplies the four pinned frontend/DSP source and header files for the raw-log cache regression:
 

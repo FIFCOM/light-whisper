@@ -312,18 +312,16 @@ pub fn read_alibaba_endpoint() -> String {
     }
 }
 
-fn update_engine_json_field(key: &str, value: &str) -> Result<(), std::io::Error> {
+fn update_engine_json(update: impl FnOnce(&mut serde_json::Value)) -> Result<(), std::io::Error> {
+    static MUTATION: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _mutation = MUTATION.lock();
     let mut obj = read_engine_json();
-    if !obj.is_object() {
-        obj = serde_json::json!({});
-    }
-    if let Some(map) = obj.as_object_mut() {
-        map.insert(
-            key.to_string(),
-            serde_json::Value::String(value.to_string()),
-        );
-    }
+    update(&mut obj);
     write_engine_json(&obj)
+}
+
+fn update_engine_json_field(key: &str, value: &str) -> Result<(), std::io::Error> {
+    update_engine_json(|obj| obj[key] = serde_json::Value::String(value.to_string()))
 }
 
 /// 写入 GLM-ASR 区域。`region`: `"international"` 或 `"domestic"`
@@ -437,29 +435,26 @@ pub fn write_gpu_idle_seconds(
     timeout_seconds: Option<u64>,
 ) -> Result<(), std::io::Error> {
     let seconds = seconds.min(MAX_GPU_IDLE_SECONDS);
-    let mut obj = read_engine_json();
-    if !obj.is_object() {
-        obj = serde_json::json!({});
-    }
-    // Keep the effective value (0 = off) separate from the user's last timeout.
-    let remembered = timeout_seconds
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| {
-            if seconds > 0 {
-                seconds
-            } else {
-                gpu_idle_timeout_from_config(&obj)
-            }
-        })
-        .min(MAX_GPU_IDLE_SECONDS);
-    if let Some(map) = obj.as_object_mut() {
-        map.insert("gpu_idle_seconds".to_string(), serde_json::json!(seconds));
-        map.insert(
-            "gpu_idle_timeout_seconds".to_string(),
-            serde_json::json!(remembered),
-        );
-    }
-    write_engine_json(&obj)
+    update_engine_json(|obj| {
+        // Keep the effective value (0 = off) separate from the user's last timeout.
+        let remembered = timeout_seconds
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| {
+                if seconds > 0 {
+                    seconds
+                } else {
+                    gpu_idle_timeout_from_config(obj)
+                }
+            })
+            .min(MAX_GPU_IDLE_SECONDS);
+        if let Some(map) = obj.as_object_mut() {
+            map.insert("gpu_idle_seconds".to_string(), serde_json::json!(seconds));
+            map.insert(
+                "gpu_idle_timeout_seconds".to_string(),
+                serde_json::json!(remembered),
+            );
+        }
+    })
 }
 
 /// 读取用户自定义模型目录（None 表示使用默认 HF 缓存）
@@ -473,24 +468,21 @@ pub fn read_models_dir() -> Option<String> {
 
 /// 写入自定义模型目录（None 表示恢复默认）
 pub fn write_models_dir(dir: Option<&str>) -> Result<(), std::io::Error> {
-    let mut obj = read_engine_json();
-    if !obj.is_object() {
-        obj = serde_json::json!({});
-    }
-    if let Some(map) = obj.as_object_mut() {
-        match dir.filter(|s| !s.is_empty()) {
-            Some(d) => {
-                map.insert(
-                    "models_dir".to_string(),
-                    serde_json::Value::String(d.to_string()),
-                );
-            }
-            None => {
-                map.remove("models_dir");
+    update_engine_json(|obj| {
+        if let Some(map) = obj.as_object_mut() {
+            match dir.filter(|s| !s.is_empty()) {
+                Some(d) => {
+                    map.insert(
+                        "models_dir".to_string(),
+                        serde_json::Value::String(d.to_string()),
+                    );
+                }
+                None => {
+                    map.remove("models_dir");
+                }
             }
         }
-    }
-    write_engine_json(&obj)
+    })
 }
 
 /// 默认 HF 缓存根目录（不考虑自定义配置）
@@ -511,6 +503,10 @@ pub fn get_effective_models_dir() -> PathBuf {
     }
     get_default_models_dir()
 }
+
+#[cfg(test)]
+#[path = "paths_concurrency_tests.rs"]
+mod concurrency_tests;
 
 #[cfg(test)]
 mod tests {

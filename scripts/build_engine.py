@@ -16,6 +16,7 @@ import filecmp
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -392,7 +393,9 @@ def verify_archive_sources(archive: Path) -> None:
         for backend in ("cpu", "cuda")
         for filename in ("runtime-manifest.json", "audiocpp.dll")
     }
+    native_prefixes = tuple(f"_internal/r2t2-native/{backend}/" for backend in ("cpu", "cuda"))
     native = {}
+    native_names = set()
     retired_packages = {"transcribe_cpp", "transcribe_cpp_native", "transcribe_cpp_native_cu12"}
     with tarfile.open(archive, mode="r|xz") as packaged:
         for member in packaged:
@@ -407,21 +410,29 @@ def verify_archive_sources(archive: Path) -> None:
                     or normalized.startswith("_internal/r2t2-native/vulkan/")
                     or normalized.rsplit("/", 1)[-1] in {"ggml-vulkan.dll", "vulkan-1.dll"}):
                 raise RuntimeError(f"Retired Vulkan runtime in bundled archive: {name}; rebuild the engine")
-            if name in native_paths:
-                if name in native or not member.isfile():
+            native_name = name.casefold()
+            if (native_name in native_paths or native_name.startswith(native_prefixes)
+                    or native_name.startswith("_internal/") and name.count("/") == 1
+                    and name not in expected):
+                if native_name in native_names:
+                    raise RuntimeError(f"Invalid bundled native file: {name}; rebuild the engine")
+                native_names.add(native_name)
+                if member.isdir():
+                    continue
+                if not member.isfile():
                     raise RuntimeError(f"Invalid bundled native file: {name}; rebuild the engine")
                 with packaged.extractfile(member) as stream:
-                    if name.endswith("runtime-manifest.json"):
+                    if native_name.endswith("runtime-manifest.json"):
                         # Dependency metadata is small; never buffer a DLL-sized manifest.
                         if member.size > 64 * 1024:
                             raise RuntimeError(f"Invalid bundled native manifest: {name}")
                         try:
-                            native[name] = json.load(stream)
+                            native[native_name] = json.load(stream)
                         except (ValueError, UnicodeError) as error:
                             raise RuntimeError(f"Invalid bundled native manifest: {name}") from error
                     else:
-                        native[name] = {"size": member.size,
-                                        "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
+                        native[native_name] = {"size": member.size,
+                                               "sha256": hashlib.file_digest(stream, "sha256").hexdigest()}
                 continue
             if name not in expected:
                 continue
@@ -449,8 +460,23 @@ def verify_archive_sources(archive: Path) -> None:
                 or any(manifest.get(key) != value for key, value in provenance.items())):
             raise RuntimeError(f"Stale bundled R2T2 {backend} runtime; rebuild the engine")
         files = manifest.get("files")
-        if not isinstance(files, dict) or files.get("audiocpp.dll") != native[f"{prefix}/audiocpp.dll"]:
-            raise RuntimeError(f"Bundled R2T2 {backend} library checksum/size mismatch; rebuild the engine")
+        if not isinstance(files, dict) or "audiocpp.dll" not in files:
+            raise RuntimeError(f"Invalid bundled R2T2 {backend} file table; rebuild the engine")
+        for directory, entries in ((prefix, files), ("_internal", manifest.get("shared_files", {}))):
+            if not isinstance(entries, dict):
+                raise RuntimeError(f"Invalid bundled R2T2 {backend} file table; rebuild the engine")
+            for filename, metadata in entries.items():
+                if (not filename or filename in {".", ".."}
+                        or any(character in filename for character in "/\\:\0")
+                        or not isinstance(metadata, dict)
+                        or type(metadata.get("size")) is not int or metadata["size"] < 0
+                        or not isinstance(metadata.get("sha256"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])):
+                    raise RuntimeError(f"Invalid bundled native metadata: {filename!r}; rebuild the engine")
+                name = f"{directory}/{filename}"
+                actual = native.get(name.casefold())
+                if actual is None or any(actual.get(key) != metadata[key] for key in ("size", "sha256")):
+                    raise RuntimeError(f"Bundled native dependency missing or checksum/size mismatch: {name}; rebuild the engine")
 
 
 def main():

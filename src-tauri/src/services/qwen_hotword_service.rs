@@ -79,35 +79,7 @@ pub fn correct_qwen_hot_words(text: &str, hot_words: &[HotWord]) -> HotWordCorre
         }
     }
 
-    candidates.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then((b.end - b.start).cmp(&(a.end - a.start)))
-            .then(a.rank.cmp(&b.rank))
-            .then(a.start.cmp(&b.start))
-    });
-
-    let mut selected: Vec<ReplacementCandidate<'_>> = Vec::new();
-    for candidate in candidates {
-        let overlaps = selected
-            .iter()
-            .any(|kept| candidate.start < kept.end && kept.start < candidate.end);
-        if !overlaps {
-            selected.push(candidate);
-        }
-    }
-
-    selected.sort_by(|a, b| b.start.cmp(&a.start));
-    let replacements = selected.len();
-    let mut corrected = text.to_owned();
-    for candidate in selected {
-        corrected.replace_range(candidate.start..candidate.end, candidate.replacement);
-    }
-
-    HotWordCorrection {
-        text: corrected,
-        replacements,
-    }
+    apply_candidates(text, candidates)
 }
 
 fn correct_known_aliases(
@@ -115,7 +87,13 @@ fn correct_known_aliases(
     hot_words: &[HotWord],
     correction_patterns: &[CorrectionPattern],
 ) -> HotWordCorrection {
-    if text.is_empty() || hot_words.is_empty() || correction_patterns.is_empty() {
+    if text.is_empty()
+        || hot_words.is_empty()
+        || !correction_patterns.iter().any(|pattern| {
+            let original = pattern.original.trim();
+            !original.is_empty() && text.contains(original)
+        })
+    {
         return HotWordCorrection {
             text: text.to_owned(),
             replacements: 0,
@@ -323,6 +301,11 @@ fn collect_ascii_candidates<'a>(
     rank: usize,
     candidates: &mut Vec<ReplacementCandidate<'a>>,
 ) {
+    let is_manual = hot_word.source == HotWordSource::User && hot_word.weight >= 3;
+    if !is_manual && !has_canonical_ascii_style(hot_text) {
+        return;
+    }
+
     let hot_normalized = normalize_ascii(hot_text);
     if hot_normalized.is_empty() {
         return;
@@ -331,12 +314,6 @@ fn collect_ascii_candidates<'a>(
     let hot_word_count = ascii_word_spans(hot_text).len().max(1);
     let min_words = hot_word_count.saturating_sub(1).max(1);
     let max_words = hot_word_count + 1;
-    let is_manual = hot_word.source == HotWordSource::User && hot_word.weight >= 3;
-    let has_canonical_style = has_canonical_ascii_style(hot_text);
-    if !is_manual && !has_canonical_style {
-        return;
-    }
-
     for start_index in 0..words.len() {
         for word_count in min_words..=max_words {
             let Some(end_index) = start_index.checked_add(word_count - 1) else {
@@ -357,8 +334,7 @@ fn collect_ascii_candidates<'a>(
                 continue;
             }
 
-            let distance = levenshtein(&candidate_normalized, &hot_normalized);
-            if distance == 0 {
+            if candidate_normalized == hot_normalized {
                 candidates.push(ReplacementCandidate {
                     start,
                     end,
@@ -377,9 +353,11 @@ fn collect_ascii_candidates<'a>(
             }
 
             let max_distance = if hot_normalized.len() >= 10 { 2 } else { 1 };
-            if distance > max_distance
-                || candidate_normalized.len().abs_diff(hot_normalized.len()) > max_distance
-            {
+            if candidate_normalized.len().abs_diff(hot_normalized.len()) > max_distance {
+                continue;
+            }
+            let distance = levenshtein(&candidate_normalized, &hot_normalized);
+            if distance > max_distance {
                 continue;
             }
 
@@ -685,6 +663,99 @@ mod tests {
     }
 
     #[test]
+    fn learned_canonical_ascii_terms_require_exact_normalized_matches() {
+        let cases = [
+            ("OpenAI", "openai", "OpenAI", 1),
+            ("OpenAI", "open ai", "OpenAI", 1),
+            ("OpenAI", "opena1", "opena1", 0),
+            ("VS Code", "vscode", "VS Code", 1),
+            ("VS Code", "vs   code", "VS Code", 1),
+            ("VS Code", "vs coda", "vs coda", 0),
+            ("AI", "a i", "AI", 1),
+            ("AI", "aj", "aj", 0),
+        ];
+        for (hot_text, raw, expected, replacements) in cases {
+            let result = correct_qwen_hot_words(raw, &[learned(hot_text)]);
+            assert_eq!(result.text, expected, "{hot_text:?}: {raw:?}");
+            assert_eq!(result.replacements, replacements, "{hot_text:?}: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn manual_ascii_edit_distance_limit_changes_at_ten_characters() {
+        let cases = [
+            ("agent", "agxnt", "agxnx"),
+            ("github", "gitxub", "gxtxub"),
+            ("whisper", "whispex", "whispxx"),
+            ("openclaw", "openclax", "openclxx"),
+            ("whisperer", "whisperxr", "whispexxr"),
+            ("typescript", "typexcripx", "xypexcripx"),
+            ("transcription", "xranscriptiox", "xxanscriptiox"),
+        ];
+        for (hot_text, accepted, rejected) in cases {
+            for (raw, expected, replacements) in [(accepted, hot_text, 1), (rejected, rejected, 0)]
+            {
+                let result = correct_qwen_hot_words(raw, &[user(hot_text)]);
+                assert_eq!(result.text, expected, "{hot_text:?}: {raw:?}");
+                assert_eq!(result.replacements, replacements, "{hot_text:?}: {raw:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn manual_ascii_length_deltas_respect_edit_distance_limits() {
+        let cases = [
+            ("agent", "agxent", "agent", 1),
+            ("agent", "aget", "agent", 1),
+            ("agent", "agxyent", "agxyent", 0),
+            ("agent", "agn", "agn", 0),
+            ("typescript", "typexxscript", "typescript", 1),
+            ("typescript", "typscrit", "typescript", 1),
+            ("typescript", "typexxxscript", "typexxxscript", 0),
+            ("typescript", "typscri", "typscri", 0),
+        ];
+        for (hot_text, raw, expected, replacements) in cases {
+            let result = correct_qwen_hot_words(raw, &[user(hot_text)]);
+            assert_eq!(result.text, expected, "{hot_text:?}: {raw:?}");
+            assert_eq!(result.replacements, replacements, "{hot_text:?}: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn manual_ascii_simple_inflections_remain_unchanged() {
+        let cases = [
+            ("agent", "AGENTS"),
+            ("agents", "AGENT"),
+            ("microbatch", "MICROBATCHES"),
+            ("microbatches", "MICROBATCH"),
+            ("reconsider", "RECONSIDERED"),
+            ("reconsidered", "RECONSIDER"),
+            ("process", "PROCESSING"),
+            ("processing", "PROCESS"),
+        ];
+        for (hot_text, raw) in cases {
+            let result = correct_qwen_hot_words(raw, &[user(hot_text)]);
+            assert_eq!(result.text, raw, "{hot_text:?}: {raw:?}");
+            assert_eq!(result.replacements, 0, "{hot_text:?}: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn manual_ascii_terms_shorter_than_five_require_exact_normalized_matches() {
+        let cases = [
+            ("code", "CODE", "code", 1),
+            ("code", "coda", "coda", 0),
+            ("AI", "ai", "AI", 1),
+            ("AI", "aj", "aj", 0),
+        ];
+        for (hot_text, raw, expected, replacements) in cases {
+            let result = correct_qwen_hot_words(raw, &[user(hot_text)]);
+            assert_eq!(result.text, expected, "{hot_text:?}: {raw:?}");
+            assert_eq!(result.replacements, replacements, "{hot_text:?}: {raw:?}");
+        }
+    }
+
+    #[test]
     fn prefers_longer_overlapping_hot_word() {
         let hot_words = vec![user("claude"), user("claude code")];
         let result = correct_qwen_hot_words("Cloud Code is ready.", &hot_words);
@@ -727,6 +798,69 @@ mod tests {
                 correct_qwen_profile_terms(unchanged, &profile).text,
                 unchanged
             );
+        }
+    }
+
+    #[test]
+    fn profile_aliases_are_ranked_before_the_one_hundred_entry_limit() {
+        let profile = UserProfile {
+            hot_words: vec![learned("canonical")],
+            correction_patterns: (0..101)
+                .rev()
+                .map(|index| {
+                    correction(
+                        &format!(" misheard{index:03} "),
+                        "canonical",
+                        101 - index,
+                        CorrectionSource::Ai,
+                    )
+                })
+                .collect(),
+            ..UserProfile::default()
+        };
+        for (raw, expected, replacements) in [
+            ("misheard100", "misheard100", 0),
+            ("misheard000", "canonical", 1),
+        ] {
+            let result = correct_qwen_profile_terms(raw, &profile);
+            assert_eq!(result.text, expected, "{raw:?}");
+            assert_eq!(result.replacements, replacements, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn profile_aliases_require_a_matching_hot_word_target() {
+        let profile = UserProfile {
+            hot_words: vec![learned("canonical")],
+            correction_patterns: vec![correction(
+                "misheard",
+                "absenttarget",
+                100,
+                CorrectionSource::Ai,
+            )],
+            ..UserProfile::default()
+        };
+        let result = correct_qwen_profile_terms("misheard", &profile);
+        assert_eq!(result.text, "misheard");
+        assert_eq!(result.replacements, 0);
+    }
+
+    #[test]
+    fn profile_aliases_ignore_empty_and_whitespace_originals() {
+        for original in ["", " \t\n "] {
+            let profile = UserProfile {
+                hot_words: vec![learned("canonical")],
+                correction_patterns: vec![correction(
+                    original,
+                    "canonical",
+                    100,
+                    CorrectionSource::Ai,
+                )],
+                ..UserProfile::default()
+            };
+            let result = correct_qwen_profile_terms("unrelated speech", &profile);
+            assert_eq!(result.text, "unrelated speech", "{original:?}");
+            assert_eq!(result.replacements, 0, "{original:?}");
         }
     }
 

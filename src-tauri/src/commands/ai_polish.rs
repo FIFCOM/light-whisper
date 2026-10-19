@@ -29,13 +29,16 @@ pub struct AiModelListPayload {
 }
 
 #[tauri::command]
-pub async fn set_ai_polish_config(
-    app_handle: tauri::AppHandle,
+pub async fn set_ai_polish_config<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     enabled: bool,
-    api_key: String,
+    api_key: Option<String>,
+    provider: Option<String>,
 ) -> Result<(), String> {
-    update_ai_polish_api_key(&app_handle, state.inner(), api_key)?;
+    if let Some(api_key) = api_key {
+        update_ai_polish_api_key(&app_handle, state.inner(), api_key, provider)?;
+    }
     state
         .profile
         .ai_polish_enabled
@@ -45,44 +48,39 @@ pub async fn set_ai_polish_config(
     Ok(())
 }
 
-fn update_ai_polish_api_key(
-    app_handle: &tauri::AppHandle,
+fn update_ai_polish_api_key<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     state: &AppState,
     api_key: String,
+    provider: Option<String>,
 ) -> Result<(), String> {
-    let provider = state.active_llm_provider();
+    let provider = provider.unwrap_or_else(|| state.active_llm_provider());
     let keyring_user = llm_provider::keyring_user_for_provider(&provider);
 
-    llm_provider::save_or_delete_api_key(app_handle, &keyring_user, &api_key)?;
-    state.set_ai_polish_api_key(api_key.clone());
-
-    // 若助手与润色共享 provider，同步助手缓存
-    let assistant_provider = state.with_profile(|p| p.llm_provider.resolve_assistant_provider());
-    if assistant_provider == provider {
-        state.set_assistant_api_key(api_key.clone());
-    }
-
-    Ok(())
+    llm_provider::save_or_delete_api_key(app_handle, &keyring_user, &api_key)
 }
 
 /// Saving a credential must not overwrite a concurrently selected processing mode.
 #[tauri::command]
-pub async fn set_ai_polish_api_key(
-    app_handle: tauri::AppHandle,
+pub async fn set_ai_polish_api_key<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
     api_key: String,
+    provider: Option<String>,
 ) -> Result<(), String> {
-    update_ai_polish_api_key(&app_handle, state.inner(), api_key)
+    update_ai_polish_api_key(&app_handle, state.inner(), api_key, provider)
 }
 
 #[tauri::command]
-pub async fn get_ai_polish_api_key(
-    app_handle: tauri::AppHandle,
+pub async fn get_ai_polish_api_key<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     state: tauri::State<'_, AppState>,
+    provider: Option<String>,
 ) -> Result<String, String> {
-    Ok(llm_provider::load_api_key_for_active_provider(
+    let provider = provider.unwrap_or_else(|| state.active_llm_provider());
+    Ok(llm_provider::load_api_key_for_provider(
         &app_handle,
-        state.inner(),
+        &provider,
     ))
 }
 
@@ -999,14 +997,6 @@ pub async fn set_assistant_api_key(
     let keyring_user = llm_provider::keyring_user_for_provider(&provider);
 
     llm_provider::save_or_delete_api_key(&app_handle, &keyring_user, &api_key)?;
-    state.with_profile(|profile| {
-        if profile.llm_provider.resolve_assistant_provider() == provider {
-            state.set_assistant_api_key(api_key.clone());
-        }
-        if profile.llm_provider.resolve_active_provider() == provider {
-            state.set_ai_polish_api_key(api_key);
-        }
-    });
 
     log::info!("助手 API Key 已更新: provider={}", provider);
     Ok(())

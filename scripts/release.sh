@@ -145,6 +145,10 @@ run_local_checks() {
     uv run --no-sync python -m compileall -q scripts src-tauri/resources
     uv run --no-sync python -m unittest discover -s src-tauri/resources -p "test_*.py"
     uv run --no-sync python scripts/test_build_engine_atomicity.py
+    uv run --no-sync python scripts/test_cpu_cuda_backends.py
+    uv run --no-sync python scripts/test_single_native_backend.py
+    uv run --no-sync python scripts/test_engine_dependency_pruning.py
+    uv run --no-sync python scripts/test_engine_archive_layout.py
     uv run --no-sync python scripts/test_release_ci.py
 
     cargo fmt --manifest-path "$CARGO_TOML" --all -- --check

@@ -34,13 +34,13 @@ automatic proof of a Rust/TypeScript function.
 | --- | --- |
 | Recording and capture | RecordingLifecycle, CapturePipeline, MicrophoneMonitor, MicrophoneAsyncOwnership, MicrophoneEffectOwners |
 | Hotkeys | HotkeyLifecycle (three event-kind runs plus registration workload), HotkeyPendingStart, HotkeyRegistrationEpoch, HotkeyRegistrationFailure |
-| Engines and migration | EngineDownload, RuntimeConfiguration, ModelDirectoryMigration, ModelIntegrityRepair |
+| Engines and migration | EngineDownload, RuntimeConfiguration, EngineConfigurationWrites, ModelDirectoryMigration, ModelIntegrityRepair |
 | GPU residency and settings | GpuIdleLifecycle (startup and runtime enable), GpuIdleSettings |
 | Authentication and provider pairing | OAuthLifecycle, OAuthStorage, ProviderRequests |
 | Credential publication and account snapshots | WebSearchKeys, ProviderAuthSnapshot, AssistantCredentialOwnership |
 | Settings and personalization | ProfilePersistence, SettingsContracts, Personalization, AppProfileRules, AsyncSettings |
 | Routing, tasks and history | ContextRouting, TaskOwnership, HistoryRecords, HistoryLeaseInterleavings, OutputDrainOwnership |
-| Windows and UI state | WindowLifecycle, UiPreferences |
+| Windows and UI state | WindowLifecycle, UiPreferences, ThemeSynchronization |
 | Download timers and event subscriptions | DownloadUiLifecycle, EventSubscriptionLifecycle |
 | Protocols and transport | RequestProtocols, LlmTransport, IpcCommandDeadline |
 
@@ -70,6 +70,9 @@ assistant output, whole-command IPC deadlines, and corrupt-cache repair.
 negative variants, and TLC-generated replay into actual production seams.
 The normal formal gate checks model/config and raw-counterexample provenance;
 editing an event list independently of its TLC State blocks fails the gate.
+The [2026-10-19 quality review](evidence/code-quality-20261019.md) records the
+credential/theme/configuration/archive regressions, hotword optimization and
+resource-limited verification results.
 
 ## Reproduce
 

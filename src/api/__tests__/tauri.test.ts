@@ -37,6 +37,95 @@ beforeEach(() => {
   invokeMock.invoke.mockReset();
 });
 
+describe("polish credential provider IPC", () => {
+  async function credentialApi() {
+    return await import("@/api/tauri") as {
+      getAiPolishApiKey: (provider?: string) => Promise<string>;
+      saveAiPolishApiKey: (apiKey: string, provider?: string) => Promise<void>;
+      setAiPolishConfig: (enabled: boolean, apiKey?: string, provider?: string) => Promise<void>;
+    };
+  }
+
+  it("reads the explicitly requested provider even if another provider is active", async () => {
+    const { getAiPolishApiKey } = await credentialApi();
+    invokeMock.invoke.mockResolvedValueOnce("saved-cerebras-key");
+
+    await expect(getAiPolishApiKey("cerebras")).resolves.toBe("saved-cerebras-key");
+
+    expect(invokeMock.invoke).toHaveBeenCalledWith("get_ai_polish_api_key", {
+      provider: "cerebras",
+    });
+  });
+
+  it("saves a captured edit to its explicitly requested provider", async () => {
+    const { saveAiPolishApiKey } = await credentialApi();
+    invokeMock.invoke.mockResolvedValueOnce(undefined);
+
+    await saveAiPolishApiKey("edited-cerebras-key", "cerebras");
+
+    expect(invokeMock.invoke).toHaveBeenCalledWith("set_ai_polish_api_key", {
+      apiKey: "edited-cerebras-key",
+      provider: "cerebras",
+    });
+  });
+
+  it("retains the legacy active-provider fallback when provider is omitted", async () => {
+    const { getAiPolishApiKey, saveAiPolishApiKey } = await credentialApi();
+    invokeMock.invoke.mockResolvedValueOnce("active-key").mockResolvedValueOnce(undefined);
+
+    await expect(getAiPolishApiKey()).resolves.toBe("active-key");
+    await saveAiPolishApiKey("replacement-active-key");
+
+    expect(invokeMock.invoke.mock.calls[0][0]).toBe("get_ai_polish_api_key");
+    expect(invokeMock.invoke.mock.calls[0][1]?.provider ?? null).toBeNull();
+    expect(invokeMock.invoke.mock.calls[1][0]).toBe("set_ai_polish_api_key");
+    expect(invokeMock.invoke.mock.calls[1][1]).toEqual(expect.objectContaining({
+      apiKey: "replacement-active-key",
+    }));
+    expect(invokeMock.invoke.mock.calls[1][1]?.provider ?? null).toBeNull();
+  });
+
+  it("updates the enabled flag without sending a credential when the key is omitted", async () => {
+    const { setAiPolishConfig } = await credentialApi();
+    invokeMock.invoke.mockResolvedValueOnce(undefined);
+
+    await setAiPolishConfig(true);
+
+    expect(invokeMock.invoke).toHaveBeenCalledWith(
+      "set_ai_polish_config",
+      expect.objectContaining({ enabled: true }),
+    );
+    expect(invokeMock.invoke.mock.calls[0][1]?.apiKey ?? null).toBeNull();
+    expect(invokeMock.invoke.mock.calls[0][1]?.provider ?? null).toBeNull();
+  });
+
+  it.each(["legacy-key", ""])("retains an explicit legacy credential value %j", async (apiKey) => {
+    const { setAiPolishConfig } = await credentialApi();
+    invokeMock.invoke.mockResolvedValueOnce(undefined);
+
+    await setAiPolishConfig(true, apiKey);
+
+    expect(invokeMock.invoke).toHaveBeenCalledWith(
+      "set_ai_polish_config",
+      expect.objectContaining({ enabled: true, apiKey }),
+    );
+    expect(invokeMock.invoke.mock.calls[0][1]?.provider ?? null).toBeNull();
+  });
+
+  it("targets the captured provider when configuring with an explicit credential", async () => {
+    const { setAiPolishConfig } = await credentialApi();
+    invokeMock.invoke.mockResolvedValueOnce(undefined);
+
+    await setAiPolishConfig(false, "edited-cerebras-key", "cerebras");
+
+    expect(invokeMock.invoke).toHaveBeenCalledWith("set_ai_polish_config", {
+      enabled: false,
+      apiKey: "edited-cerebras-key",
+      provider: "cerebras",
+    });
+  });
+});
+
 describe("Decision connection IPC", () => {
   it("reads defaults and saves arbitrary connection fields for an explicit provider", async () => {
     const { getJevConnection, setJevConnection } = await import("@/api/tauri");
