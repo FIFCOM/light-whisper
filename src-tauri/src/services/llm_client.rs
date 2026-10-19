@@ -532,7 +532,7 @@ mod tests {
                 assert_eq!(body["model"], model);
                 assert_eq!(
                     body.get("stream").and_then(serde_json::Value::as_bool),
-                    (!(provider == "cerebras" && !responses)).then_some(true),
+                    (provider != "cerebras" || responses).then_some(true),
                     "existing Cerebras JSON/stream compatibility must be preserved: {body}"
                 );
                 if responses {
