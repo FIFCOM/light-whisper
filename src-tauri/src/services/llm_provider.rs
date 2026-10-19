@@ -90,7 +90,6 @@ fn default_endpoint_parts(provider: &str) -> (&'static str, &'static str, u64) {
 fn default_api_suffix(provider: &str) -> &'static str {
     match provider {
         OPENAI | XAI => "responses",
-        OPENROUTER => "chat/completions",
         _ => "chat/completions",
     }
 }
