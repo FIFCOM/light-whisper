@@ -14,6 +14,7 @@ the built-in lists are discovery fallbacks, not model allowlists.
 | DeepSeek | `deepseek-flash` | `https://api.deepseek.com/v1/responses` | [Responses and model aliases](https://api-docs.deepseek.com/quick_start/pricing/) |
 | Cerebras | `qwen-3.8-27b` | `https://api.cerebras.ai/v1/chat/completions` | [Chat Completions](https://inference-docs.cerebras.ai/resources/openai) |
 | SiliconFlow | `Qwen/Qwen3.8-27B` | `https://api.siliconflow.cn/v1/chat/completions` | [Chat Completions](https://docs.siliconflow.cn/docs/api/chat-completions-post), [model catalog](https://www.siliconflow.cn/models) |
+| OpenRouter | `~deepseek/deepseek-flash-latest` | `https://openrouter.ai/api/v1/chat/completions` | [Chat Completions](https://openrouter.ai/docs/api-reference/chat-completions), [model catalog](https://openrouter.ai/models) |
 
 OpenAI retains the small-model role previously filled by GPT-4.1 mini. The new
 Cerebras and SiliconFlow Qwen defaults retain native thinking controls. Cerebras
@@ -36,6 +37,16 @@ protocol regression tests do not establish upstream search availability.
 Cerebras and SiliconFlow do not currently document an OpenAI Responses endpoint.
 Custom OpenAI-compatible connections default to Chat Completions and honor an
 explicit `/responses` URL. Anthropic connections retain `/v1/messages`.
+
+OpenRouter is detected by host, so both the built-in preset and an
+OpenAI-compatible custom connection pointed at `openrouter.ai` share the same
+behavior. Reasoning uses OpenRouter's unified `reasoning` object: the off tier
+sends `reasoning.enabled = false`, and the light/balanced/deep tiers map to
+`reasoning.effort` (`low`/`medium`/`high`).
+Output length uses `max_completion_tokens` (OpenRouter documents `max_tokens`
+as deprecated). Models flagged `mandatory` by OpenRouter reject
+`reasoning.enabled = false`; the request then retries once without any
+reasoning control and keeps the model default.
 
 Subscription authentication keeps its existing dedicated transport: OpenAI Codex
 uses `https://chatgpt.com/backend-api/codex/responses`, and Grok Build uses

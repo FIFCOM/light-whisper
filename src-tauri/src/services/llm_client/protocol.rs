@@ -65,6 +65,7 @@ fn uses_openai_chat_completions_api(endpoint: &LlmEndpoint) -> bool {
 pub(crate) fn chat_output_token_limit_key(endpoint: &LlmEndpoint) -> &'static str {
     if uses_openai_chat_completions_api(endpoint)
         || llm_provider::is_cerebras_like_endpoint(endpoint)
+        || llm_provider::is_openrouter_like_endpoint(endpoint)
     {
         "max_completion_tokens"
     } else {
