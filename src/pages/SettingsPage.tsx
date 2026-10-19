@@ -12,7 +12,6 @@ import { useModelDirectorySettings } from "@/hooks/useModelDirectorySettings";
 import { useMicrophoneSettings } from "@/hooks/useMicrophoneSettings";
 import {
   setInputMethodCommand,
-  setAiPolishConfig,
   saveAiPolishApiKey,
   setScreenContextMode,
   setWebSearchMode,
@@ -412,6 +411,11 @@ export default function SettingsPage({
   // --- LLM provider ---
   const [providerDrafts, setProviderDrafts] = useState<LlmProviderDraftMap>(() => readLlmProviderDrafts());
   const [llmProvider, setLlmProvider] = useState("cerebras");
+  const polishProviderRef = useRef(llmProvider);
+  polishProviderRef.current = llmProvider;
+  const polishKeyRequestIdRef = useRef(0);
+  const polishKeyEditIdRef = useRef(0);
+  const polishKeyDraftsRef = useRef<Record<string, { value: string; id: number }>>({});
   const [customBaseUrl, setCustomBaseUrl] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [assistantUseSeparateModel, setAssistantUseSeparateModel] = useState(false);
@@ -566,8 +570,15 @@ export default function SettingsPage({
   const [correctionModalOpen, setCorrectionModalOpen] = useState(false);
   const correctionManageButtonRef = useRef<HTMLButtonElement>(null);
 
-  const aiPolishKeySave = useDebouncedCallback((value: string) => {
-    return saveAiPolishApiKey(value).catch(() => {});
+  const aiPolishKeySave = useDebouncedCallback(async (value: string, provider: string, id: number) => {
+    try {
+      await saveAiPolishApiKey(value, provider);
+      if (polishKeyDraftsRef.current[provider]?.id === id) {
+        delete polishKeyDraftsRef.current[provider];
+      }
+    } catch {
+      // Keep the provider's draft available when credential storage fails.
+    }
   }, 600, { onUnmount: "flush" });
 
   const assistantKeySave = useDebouncedCallback(async (value: string, provider: string, id: number) => {
@@ -675,14 +686,19 @@ export default function SettingsPage({
     };
   }, [providerDrafts, customProviders]);
 
-  const refreshAiPolishKey = useCallback(async () => {
+  const refreshAiPolishKey = useCallback(async (provider = polishProviderRef.current) => {
+    if (provider !== polishProviderRef.current) return "";
+    const requestId = ++polishKeyRequestIdRef.current;
+    const draft = polishKeyDraftsRef.current[provider];
+    setAiPolishApiKey(draft?.value ?? "");
+    const current = () => requestId === polishKeyRequestIdRef.current
+      && provider === polishProviderRef.current && !draft && !polishKeyDraftsRef.current[provider];
     try {
-      const key = (await getAiPolishApiKey()) || "";
-      setAiPolishApiKey(key);
-      await saveAiPolishApiKey(key).catch(() => {});
+      const key = (await getAiPolishApiKey(provider)) || "";
+      if (current()) setAiPolishApiKey(key);
       return key;
     } catch {
-      setAiPolishApiKey("");
+      if (current()) setAiPolishApiKey("");
       return "";
     }
   }, []);
@@ -764,11 +780,6 @@ export default function SettingsPage({
     }
   }, []);
 
-  // 从系统密钥环加载 API Key，并同步 enabled 状态到后端
-  useEffect(() => {
-    void refreshAiPolishKey();
-  }, [refreshAiPolishKey]);
-
   // 加载用户画像
   const refreshProfile = useCallback(async () => {
     setProfileLoadPending(true);
@@ -803,7 +814,9 @@ export default function SettingsPage({
       const nextAssistantDefaultModel = assistantCp
         ? assistantCp.model
         : resolveLlmModel(nextAssistantProvider, assistantPreset.defaultModel);
+      polishProviderRef.current = nextProvider;
       setLlmProvider(nextProvider);
+      void refreshAiPolishKey(nextProvider);
       setCustomBaseUrl(nextBaseUrl);
       setCustomModel(nextModel);
       setAssistantUseSeparateModel(nextAssistantUseSeparateModel);
@@ -862,7 +875,7 @@ export default function SettingsPage({
     } finally {
       setProfileLoadPending(false);
     }
-  }, [updateProviderDraft]);
+  }, [refreshAiPolishKey, updateProviderDraft]);
 
   const refreshProfileAndKeys = useCallback(async () => {
     const loadedProfile = await refreshProfile();
@@ -1759,9 +1772,8 @@ export default function SettingsPage({
 
     updateProviderDraft(llmProvider, customBaseUrl, customModel);
     void assistantKeySave.flush();
-    aiPolishKeySave.cancel();
+    void aiPolishKeySave.flush();
     llmConfigSave.cancel();
-    await saveAiPolishApiKey(aiPolishApiKey).catch(() => {});
 
     const nextDraft = resolveProviderDraft(nextProvider);
     const nextAssistantModel = resolveAssistantModelForPolishProviderChange({
@@ -1771,7 +1783,9 @@ export default function SettingsPage({
       nextPolishModel: nextDraft.model,
       assistantDefaultModel: currentAssistantPreset.defaultModel,
     });
+    polishProviderRef.current = nextProvider;
     setLlmProvider(nextProvider);
+    void refreshAiPolishKey(nextProvider);
     setCustomBaseUrl(nextDraft.baseUrl);
     setCustomModel(nextDraft.model);
     setAssistantModel(nextAssistantModel);
@@ -1794,14 +1808,11 @@ export default function SettingsPage({
       assistantProviderToPersist,
     );
     await llmConfigSave.flush();
-    await refreshAiPolishKey();
-    if (!assistantUseSeparateModel) {
+    if (polishProviderRef.current === nextProvider && !assistantUseSeparateModel) {
       assistantProviderRef.current = nextProvider;
       await refreshAssistantKey(nextProvider);
     }
   }, [
-    aiPolishApiKey,
-    aiPolishEnabled,
     assistantProviderToPersist,
     customBaseUrl,
     customModel,
@@ -1940,16 +1951,14 @@ export default function SettingsPage({
     try {
       const autoEnabled = await setTranslationTarget(target);
       if (autoEnabled) {
-        aiPolishKeySave.cancel();
         setAiPolishEnabled(true);
         writeLocalStorage(AI_POLISH_ENABLED_KEY, "true");
-        await setAiPolishConfig(true, aiPolishApiKey).catch(() => {});
         toast.success(t("toast.translationAutoPolish"));
       }
     } catch {
       toast.error(t("toast.translationSaveFailed"));
     }
-  }, [aiPolishApiKey, aiPolishKeySave]);
+  }, [t]);
 
   const handleCustomPromptChange = useCallback((value: string) => {
     setCustomPromptState(value);
@@ -3022,6 +3031,7 @@ export default function SettingsPage({
                                         nextPolishModel: model,
                                         assistantDefaultModel: currentAssistantPreset.defaultModel,
                                       });
+                                      polishProviderRef.current = id;
                                       setLlmProvider(id);
                                       setCustomBaseUrl(baseUrl);
                                       setCustomModel(model);
@@ -3041,7 +3051,7 @@ export default function SettingsPage({
                                         assistantProviderToPersist,
                                       );
                                       await llmConfigSave.flush();
-                                      await refreshAiPolishKey();
+                                      await refreshAiPolishKey(id);
                                     });
                                   }}
                                 >{t("common.add")}</button>
@@ -3114,8 +3124,12 @@ export default function SettingsPage({
                     ariaLabelShow={t("settings.showApiKey")}
                     ariaLabelHide={t("settings.hideApiKey")}
                     onChange={(value) => {
+                      const provider = polishProviderRef.current;
+                      const id = ++polishKeyEditIdRef.current;
+                      ++polishKeyRequestIdRef.current;
+                      polishKeyDraftsRef.current[provider] = { value, id };
                       setAiPolishApiKey(value);
-                      aiPolishKeySave.schedule(value);
+                      aiPolishKeySave.schedule(value, provider, id);
                     }}
                   />
                 </div>

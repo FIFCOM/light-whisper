@@ -8,7 +8,6 @@ use tauri_plugin_keyring::KeyringExt;
 use crate::services::codex_oauth_service;
 use crate::services::grok_build_oauth_service;
 use crate::state::user_profile::{ApiFormat, CustomProvider, LlmProviderConfig, LlmReasoningMode};
-use crate::state::AppState;
 
 /// LLM 提供商配置
 pub struct LlmEndpoint {
@@ -1411,8 +1410,8 @@ pub fn build_auth_headers(
 }
 
 /// 保存或删除 API Key：非空则写入密钥环，空则删除
-pub fn save_or_delete_api_key(
-    app_handle: &tauri::AppHandle,
+pub fn save_or_delete_api_key<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
     keyring_user: &str,
     api_key: &str,
 ) -> Result<(), String> {
@@ -1464,7 +1463,10 @@ mod credential_persistence_tests {
     }
 }
 
-pub fn load_api_key_for_provider(app_handle: &tauri::AppHandle, provider: &str) -> String {
+pub fn load_api_key_for_provider<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    provider: &str,
+) -> String {
     let keyring_user = keyring_user_for_provider(provider);
     app_handle
         .keyring()
@@ -1472,23 +1474,6 @@ pub fn load_api_key_for_provider(app_handle: &tauri::AppHandle, provider: &str) 
         .ok()
         .flatten()
         .unwrap_or_default()
-}
-
-pub fn load_api_key_for_active_provider(app_handle: &tauri::AppHandle, state: &AppState) -> String {
-    load_api_key_for_provider(app_handle, &state.active_llm_provider())
-}
-
-pub fn sync_assistant_api_key(app_handle: &tauri::AppHandle, state: &AppState) {
-    let provider = state.with_profile(|p| p.llm_provider.resolve_assistant_provider());
-    let key = load_api_key_for_provider(app_handle, &provider);
-    state.set_assistant_api_key(key);
-}
-
-pub fn sync_runtime_api_key(app_handle: &tauri::AppHandle, state: &AppState) -> String {
-    let api_key = load_api_key_for_active_provider(app_handle, state);
-    state.set_ai_polish_api_key(api_key.clone());
-    sync_assistant_api_key(app_handle, state);
-    api_key
 }
 
 #[cfg(test)]

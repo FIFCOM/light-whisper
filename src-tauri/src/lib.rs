@@ -143,7 +143,7 @@ pub fn run() {
                 use tauri_plugin_keyring::KeyringExt;
                 let state = app_handle.state::<AppState>();
                 let provider = state.active_llm_provider();
-                let key = services::llm_provider::sync_runtime_api_key(&app_handle, state.inner());
+                let key = services::llm_provider::load_api_key_for_provider(&app_handle, &provider);
                 if !key.is_empty() {
                     log::info!("已从密钥环加载 AI 润色 API Key (provider: {})", provider);
                 }

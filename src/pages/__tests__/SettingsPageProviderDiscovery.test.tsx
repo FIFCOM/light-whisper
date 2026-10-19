@@ -338,6 +338,296 @@ function modelInfo(id: string, ownedBy = "test-owner"): AiModelInfo {
 beforeEach(() => resetMocks());
 afterEach(() => vi.clearAllMocks());
 
+describe("SettingsPage polish credential ownership", () => {
+  function installCredentialStore(initialProvider = "cerebras") {
+    const keys: Record<string, string> = {
+      cerebras: "saved-cerebras-key",
+      deepseek: "saved-deepseek-key",
+      openai: "saved-openai-key",
+    };
+    let activeProvider = initialProvider;
+    tauriMock.getAiPolishApiKey.mockImplementation(async (provider?: string) => (
+      keys[provider ?? activeProvider] ?? ""
+    ));
+    tauriMock.saveAiPolishApiKey.mockImplementation(async (value: string, provider?: string) => {
+      keys[provider ?? activeProvider] = value;
+    });
+    tauriMock.setLlmProviderConfig.mockImplementation(async (provider: string) => {
+      activeProvider = provider;
+    });
+    return { keys, activeProvider: () => activeProvider };
+  }
+
+  async function selectPolishProvider(name: string) {
+    const listbox = openProviderPicker();
+    await act(async () => {
+      fireEvent.click(within(listbox).getByRole("option", { name: new RegExp(`^${name}`) }));
+    });
+  }
+
+  async function elapseDebounce() {
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+  }
+
+  async function enableTranslation() {
+    fireEvent.click(screen.getByRole("button", { name: "settings.translationTargetLanguage" }));
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole("listbox")).getByText("English"));
+    });
+  }
+
+  afterEach(() => vi.useRealTimers());
+
+  it("enables translation while a credential read is pending without saving an empty key", async () => {
+    const store = installCredentialStore();
+    const read = deferred<string>();
+    tauriMock.getAiPolishApiKey.mockReturnValueOnce(read.promise);
+    tauriMock.setTranslationTarget.mockResolvedValueOnce(true);
+    await renderSettings();
+
+    await enableTranslation();
+    await act(async () => { read.resolve("saved-cerebras-key"); await read.promise; });
+
+    expect(tauriMock.setTranslationTarget).toHaveBeenCalledWith("English");
+    expect(screen.getByRole("button", { name: "settings.translationTargetLanguage" })).toHaveTextContent("English");
+    expect(tauriMock.setAiPolishConfig).not.toHaveBeenCalled();
+    expect(tauriMock.saveAiPolishApiKey).not.toHaveBeenCalled();
+    expect(store.keys.cerebras).toBe("saved-cerebras-key");
+    expect(screen.getByPlaceholderText("Cerebras API Key")).toHaveValue("saved-cerebras-key");
+  });
+
+  it("preserves the pending credential edit when translation automatically enables polish", async () => {
+    const store = installCredentialStore();
+    tauriMock.setTranslationTarget.mockResolvedValueOnce(true);
+    await renderSettings();
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByPlaceholderText("Cerebras API Key"), {
+      target: { value: "edited-cerebras-key" },
+    });
+
+    await enableTranslation();
+    await elapseDebounce();
+
+    expect(tauriMock.setTranslationTarget).toHaveBeenCalledWith("English");
+    expect(tauriMock.setAiPolishConfig).not.toHaveBeenCalled();
+    expect(tauriMock.saveAiPolishApiKey.mock.calls).toEqual([["edited-cerebras-key", "cerebras"]]);
+    expect(store.keys.cerebras).toBe("edited-cerebras-key");
+    expect(screen.getByPlaceholderText("Cerebras API Key")).toHaveValue("edited-cerebras-key");
+  });
+
+  it("loads the profile provider credential instead of the initial UI default", async () => {
+    installCredentialStore("deepseek");
+    await renderSettings({
+      ...baseProfile,
+      llm_provider: { ...baseProfile.llm_provider, active: "deepseek" },
+    });
+
+    expect(screen.getByPlaceholderText("DeepSeek API Key")).toHaveValue("saved-deepseek-key");
+    expect(tauriMock.getAiPolishApiKey).toHaveBeenLastCalledWith("deepseek");
+    expect(tauriMock.saveAiPolishApiKey).not.toHaveBeenCalled();
+  });
+
+  it("loads and switches saved credentials without writing them back", async () => {
+    const store = installCredentialStore();
+    await renderSettings();
+    expect(screen.getByPlaceholderText("Cerebras API Key")).toHaveValue(store.keys.cerebras);
+
+    await selectPolishProvider("OpenAI");
+
+    expect(screen.getByPlaceholderText("OpenAI API Key")).toHaveValue(store.keys.openai);
+    expect(tauriMock.saveAiPolishApiKey).not.toHaveBeenCalled();
+  });
+
+  it("preserves provider slots when the initial credential read finishes after a switch", async () => {
+    const store = installCredentialStore();
+    const initialRead = deferred<string>();
+    tauriMock.getAiPolishApiKey.mockReturnValueOnce(initialRead.promise);
+    await renderSettings();
+
+    await selectPolishProvider("OpenAI");
+    await act(async () => {
+      initialRead.resolve("saved-cerebras-key");
+      await initialRead.promise;
+    });
+
+    expect(store.keys).toEqual({
+      cerebras: "saved-cerebras-key",
+      deepseek: "saved-deepseek-key",
+      openai: "saved-openai-key",
+    });
+    expect(screen.getByPlaceholderText("OpenAI API Key")).toHaveValue("saved-openai-key");
+    expect(tauriMock.saveAiPolishApiKey).not.toHaveBeenCalled();
+  });
+
+  it.each(["success", "failure"] as const)("ignores an earlier provider read that finishes with %s", async (outcome) => {
+    installCredentialStore();
+    await renderSettings();
+    const oldRead = deferred<string>();
+    tauriMock.getAiPolishApiKey.mockReturnValueOnce(oldRead.promise);
+    tauriMock.saveAiPolishApiKey.mockClear();
+
+    await selectPolishProvider("OpenAI");
+    await selectPolishProvider("DeepSeek");
+    expect(screen.getByPlaceholderText("DeepSeek API Key")).toHaveValue("saved-deepseek-key");
+    await act(async () => {
+      if (outcome === "success") oldRead.resolve("old-openai-key");
+      else oldRead.reject(new Error("retired provider read failed"));
+      await oldRead.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByPlaceholderText("DeepSeek API Key")).toHaveValue("saved-deepseek-key");
+    expect(tauriMock.saveAiPolishApiKey).not.toHaveBeenCalled();
+  });
+
+  it.each(["success", "failure"] as const)("keeps an edit when its pending credential read finishes with %s", async (outcome) => {
+    installCredentialStore();
+    await renderSettings();
+    const read = deferred<string>();
+    tauriMock.getAiPolishApiKey.mockReturnValueOnce(read.promise);
+    await selectPolishProvider("OpenAI");
+    tauriMock.saveAiPolishApiKey.mockClear();
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByPlaceholderText("OpenAI API Key"), {
+      target: { value: "edited-openai-key" },
+    });
+
+    await act(async () => {
+      if (outcome === "success") read.resolve("previously-saved-openai-key");
+      else read.reject(new Error("credential read failed"));
+      await read.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByPlaceholderText("OpenAI API Key")).toHaveValue("edited-openai-key");
+    await elapseDebounce();
+    expect(tauriMock.saveAiPolishApiKey.mock.calls).toEqual([["edited-openai-key", "openai"]]);
+  });
+
+  it("flushes only the captured edit to its original provider before changing providers", async () => {
+    const store = installCredentialStore();
+    await renderSettings();
+    tauriMock.saveAiPolishApiKey.mockClear();
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByPlaceholderText("Cerebras API Key"), {
+      target: { value: "edited-cerebras-key" },
+    });
+
+    await selectPolishProvider("OpenAI");
+    await elapseDebounce();
+
+    expect(tauriMock.saveAiPolishApiKey.mock.calls).toEqual([["edited-cerebras-key", "cerebras"]]);
+    expect(store.keys.cerebras).toBe("edited-cerebras-key");
+    expect(store.keys.openai).toBe("saved-openai-key");
+  });
+
+  it("preserves an unread middle provider slot during rapid A to B to C switches", async () => {
+    const store = installCredentialStore();
+    await renderSettings();
+    const middleRead = deferred<string>();
+    tauriMock.getAiPolishApiKey.mockReturnValueOnce(middleRead.promise);
+    tauriMock.saveAiPolishApiKey.mockClear();
+
+    await selectPolishProvider("OpenAI");
+    await selectPolishProvider("DeepSeek");
+    await act(async () => {
+      middleRead.resolve("saved-openai-key");
+      await middleRead.promise;
+    });
+
+    expect(store.keys.openai).toBe("saved-openai-key");
+    expect(store.keys.deepseek).toBe("saved-deepseek-key");
+    expect(screen.getByPlaceholderText("DeepSeek API Key")).toHaveValue("saved-deepseek-key");
+    expect(tauriMock.saveAiPolishApiKey).not.toHaveBeenCalled();
+  });
+
+  it("keeps a newer draft when a slow save completes after leaving and returning to its provider", async () => {
+    const store = installCredentialStore();
+    await renderSettings();
+    const firstWrite = deferred<void>();
+    const secondWrite = deferred<void>();
+    tauriMock.saveAiPolishApiKey.mockClear()
+      .mockImplementation(async (value: string, provider?: string) => {
+        const targetProvider = provider ?? store.activeProvider();
+        await secondWrite.promise;
+        store.keys[targetProvider] = value;
+      })
+      .mockImplementationOnce(async (value: string, provider?: string) => {
+        const targetProvider = provider ?? store.activeProvider();
+        await firstWrite.promise;
+        store.keys[targetProvider] = value;
+      });
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByPlaceholderText("Cerebras API Key"), {
+      target: { value: "older-cerebras-draft" },
+    });
+    await elapseDebounce();
+    await selectPolishProvider("OpenAI");
+    await selectPolishProvider("Cerebras");
+    fireEvent.change(screen.getByPlaceholderText("Cerebras API Key"), {
+      target: { value: "newer-cerebras-draft" },
+    });
+    await elapseDebounce();
+    expect(tauriMock.saveAiPolishApiKey).toHaveBeenCalledTimes(1);
+    await act(async () => { firstWrite.resolve(); await firstWrite.promise; });
+    await selectPolishProvider("OpenAI");
+    await selectPolishProvider("Cerebras");
+
+    expect(screen.getByPlaceholderText("Cerebras API Key")).toHaveValue("newer-cerebras-draft");
+    expect(store.keys.cerebras).toBe("older-cerebras-draft");
+    await act(async () => { secondWrite.resolve(); await secondWrite.promise; });
+    expect(store.keys.cerebras).toBe("newer-cerebras-draft");
+    expect(store.keys.openai).toBe("saved-openai-key");
+    expect(tauriMock.saveAiPolishApiKey.mock.calls).toEqual([
+      ["older-cerebras-draft", "cerebras"],
+      ["newer-cerebras-draft", "cerebras"],
+    ]);
+  });
+
+  it("ignores a read begun during a dirty draft even after its save clears that draft", async () => {
+    const store = installCredentialStore();
+    await renderSettings();
+    const write = deferred<void>();
+    const staleRead = deferred<string>();
+    tauriMock.saveAiPolishApiKey.mockClear().mockImplementationOnce(async (value: string, provider?: string) => {
+      const targetProvider = provider ?? store.activeProvider();
+      await write.promise;
+      store.keys[targetProvider] = value;
+    });
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByPlaceholderText("Cerebras API Key"), {
+      target: { value: "saved-new-cerebras-key" },
+    });
+    await elapseDebounce();
+    await selectPolishProvider("OpenAI");
+    tauriMock.getAiPolishApiKey.mockReturnValueOnce(staleRead.promise);
+    await selectPolishProvider("Cerebras");
+    expect(screen.getByPlaceholderText("Cerebras API Key")).toHaveValue("saved-new-cerebras-key");
+
+    await act(async () => { write.resolve(); await write.promise; });
+    await act(async () => { staleRead.resolve("saved-cerebras-key"); await staleRead.promise; });
+
+    expect(store.keys.cerebras).toBe("saved-new-cerebras-key");
+    expect(screen.getByPlaceholderText("Cerebras API Key")).toHaveValue("saved-new-cerebras-key");
+  });
+
+  it("retains a failed edit for its provider across switching away and back", async () => {
+    const store = installCredentialStore();
+    await renderSettings();
+    tauriMock.saveAiPolishApiKey.mockClear().mockRejectedValue(new Error("credential store unavailable"));
+    vi.useFakeTimers();
+    fireEvent.change(screen.getByPlaceholderText("Cerebras API Key"), {
+      target: { value: "retryable-cerebras-key" },
+    });
+    await elapseDebounce();
+    await selectPolishProvider("OpenAI");
+    await selectPolishProvider("Cerebras");
+
+    expect(store.keys.cerebras).toBe("saved-cerebras-key");
+    expect(store.keys.openai).toBe("saved-openai-key");
+    expect(screen.getByPlaceholderText("Cerebras API Key")).toHaveValue("retryable-cerebras-key");
+    expect(tauriMock.saveAiPolishApiKey).toHaveBeenCalledWith("retryable-cerebras-key", "cerebras");
+  });
+});
+
 describe("SettingsPage assistant credential ownership", () => {
   const profile: UserProfile = {
     ...baseProfile,
@@ -528,14 +818,14 @@ describe("SettingsPage assistant credential ownership", () => {
       openai: "saved-openai-key",
     };
     let polishProvider = "cerebras";
-    tauriMock.getAiPolishApiKey.mockImplementation(async () => savedKeys[polishProvider]);
+    tauriMock.getAiPolishApiKey.mockImplementation(async (provider?: string) => savedKeys[provider ?? polishProvider]);
     tauriMock.getAssistantApiKey.mockImplementation(async (provider: string) => savedKeys[provider]);
     tauriMock.setAssistantApiKey.mockImplementation(async (value: string, provider: string) => {
       savedKeys[provider] = value;
     });
     // ai_polish.rs::update_ai_polish_api_key shares the provider keyring with the assistant.
-    tauriMock.saveAiPolishApiKey.mockImplementation(async (value: string) => {
-      savedKeys[polishProvider] = value;
+    tauriMock.saveAiPolishApiKey.mockImplementation(async (value: string, provider?: string) => {
+      savedKeys[provider ?? polishProvider] = value;
     });
     tauriMock.setLlmProviderConfig.mockImplementation(async (...args: unknown[]) => {
       polishProvider = args[0] as string;
@@ -559,7 +849,7 @@ describe("SettingsPage assistant credential ownership", () => {
       target: { value: "shared-polish-key-b" },
     });
     await elapseDebounce();
-    expect(tauriMock.saveAiPolishApiKey).toHaveBeenLastCalledWith("shared-polish-key-b");
+    expect(tauriMock.saveAiPolishApiKey).toHaveBeenLastCalledWith("shared-polish-key-b", "deepseek");
     expect(savedKeys.deepseek).toBe("shared-polish-key-b");
 
     const cerebrasProviders = openProviderPicker();

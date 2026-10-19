@@ -1,15 +1,13 @@
 /**
- * TDD red-state tests for `RecordingContext`.
+ * Startup synchronization tests for `RecordingContext`.
  *
  * Contract: startup sync failures in the provider's useEffect
  * (setInputMethodCommand / setInputDevice / setSoundEnabled /
- * setRecordingMode / getAiPolishApiKey) must be surfaced via a
+ * setRecordingMode / setAiPolishConfig) must be surfaced via an
  * observable channel — specifically `console.error` — instead of
  * silently swallowed with `.catch(() => {})`.
  *
- * These tests are expected to FAIL against the current implementation in
- * `RecordingContext.tsx` and pass once the five `.catch(() => {})` calls
- * are replaced with something that reports the failure.
+ * Enabling polish at startup must not read or rewrite provider credentials.
  */
 import { render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -26,8 +24,9 @@ const tauriMock = vi.hoisted(() => ({
   setInputDevice: vi.fn<(name?: string | null) => Promise<void>>(),
   setSoundEnabled: vi.fn<(enabled: boolean) => Promise<void>>(),
   setRecordingMode: vi.fn<(toggle: boolean) => Promise<void>>(),
-  setAiPolishConfig: vi.fn<(enabled: boolean, apiKey: string) => Promise<void>>(),
+  setAiPolishConfig: vi.fn<(enabled: boolean, apiKey?: string, provider?: string) => Promise<void>>(),
   getAiPolishApiKey: vi.fn<() => Promise<string>>(),
+  saveAiPolishApiKey: vi.fn<(apiKey: string, provider?: string) => Promise<void>>(),
 }));
 
 // Stub the three hooks pulled in by RecordingProvider so we don't spin up
@@ -113,6 +112,7 @@ beforeEach(() => {
   tauriMock.setRecordingMode.mockResolvedValue(undefined);
   tauriMock.setAiPolishConfig.mockResolvedValue(undefined);
   tauriMock.getAiPolishApiKey.mockResolvedValue("dummy-api-key");
+  tauriMock.saveAiPolishApiKey.mockResolvedValue(undefined);
 
   consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -130,6 +130,24 @@ async function flushPromises() {
 }
 
 describe("RecordingProvider startup sync error reporting", () => {
+  it("enables polish without reading or writing a provider credential", async () => {
+    storageMock.readLocalStorage.mockImplementation(
+      (key) => (key === AI_POLISH_ENABLED_KEY ? STORAGE_TRIGGERS[key] : null),
+    );
+    tauriMock.getAiPolishApiKey.mockReturnValue(new Promise<string>(() => {}));
+
+    render(
+      <RecordingProvider>
+        <div />
+      </RecordingProvider>,
+    );
+    await flushPromises();
+
+    expect(tauriMock.getAiPolishApiKey).not.toHaveBeenCalled();
+    expect(tauriMock.saveAiPolishApiKey).not.toHaveBeenCalled();
+    expect(tauriMock.setAiPolishConfig.mock.calls).toEqual([[true]]);
+  });
+
   it("reports setInputMethodCommand rejection via console.error", async () => {
     storageMock.readLocalStorage.mockImplementation(
       (key) => (key === INPUT_METHOD_KEY ? STORAGE_TRIGGERS[key] : null),
@@ -153,12 +171,12 @@ describe("RecordingProvider startup sync error reporting", () => {
     expect(logged).toMatch(/setInputMethod|set_input_method/i);
   });
 
-  it("reports getAiPolishApiKey rejection via console.error and does not throw", async () => {
+  it("reports setAiPolishConfig rejection via console.error and does not throw", async () => {
     storageMock.readLocalStorage.mockImplementation(
       (key) => (key === AI_POLISH_ENABLED_KEY ? STORAGE_TRIGGERS[key] : null),
     );
-    tauriMock.getAiPolishApiKey.mockRejectedValueOnce(
-      new Error("keyring locked"),
+    tauriMock.setAiPolishConfig.mockRejectedValueOnce(
+      new Error("backend unavailable"),
     );
 
     expect(() =>
@@ -170,6 +188,8 @@ describe("RecordingProvider startup sync error reporting", () => {
     ).not.toThrow();
     await flushPromises();
 
+    expect(tauriMock.setAiPolishConfig.mock.calls).toEqual([[true]]);
+    expect(tauriMock.getAiPolishApiKey).not.toHaveBeenCalled();
     expect(consoleErrorSpy).toHaveBeenCalled();
   });
 

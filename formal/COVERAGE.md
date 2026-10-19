@@ -89,6 +89,31 @@ an explicit contract, with actual source and evidence paths.
   decision contracts have Lean proofs. Production correspondence is reviewed
   code plus tests, not an automatic source refinement theorem.
 
+- EngineConfigurationWrites checks four independent engine.json updates in one
+  application process, including atomic replacement failure and lock release.
+  The implementation regression pauses a real transaction and runs each public
+  writer against it; it checks engine, model, GPU settings and directory set/reset
+  while preserving unknown fields. External processes and filesystem durability
+  remain outside this mutex contract.
+- ThemeSynchronization checks two windows with two mounted consumers each,
+  manual/system modes and delivery of the latest stored preference. Real-hook
+  regressions cover stale queued storage notifications, unavailable storage,
+  late mounts, full teardown/remount and delayed animation callbacks. Mount
+  lifecycles, delivery liveness and pixels are outside the abstract model.
+- The credential ownership companion applies independently to polish and
+  assistant editors. Polish regressions additionally cover initial profile
+  hydration, enabled-only startup, translation auto-enable and legacy IPC
+  compatibility through the real keyring plugin with an in-memory credential
+  backend. Neither enabling polish nor reading credentials writes a key.
+- Engine archive completeness is checked by implementation tests, not by the
+  model-cache integrity theorem. Those tests cover every declared local/shared
+  dependency, malformed metadata, size/hash mismatch, path escape, duplicate
+  ordering, Windows case collisions, nonregular entries and bounded DLL reads.
+- Hotword matching retains the existing exact-match, edit-distance, inflection
+  and alias-ranking rules. Concrete production-path regressions pin those
+  boundaries and the existing latency budget; the text-matching algorithm has
+  no source-level refinement proof in these workflow models.
+
 ## What the gates mean
 
 Inventory equality checks that no current registered boundary is omitted.

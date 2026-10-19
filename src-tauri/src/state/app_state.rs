@@ -392,8 +392,6 @@ impl RecordingState {
 pub struct ProfileState {
     pub user_profile: Arc<parking_lot::Mutex<UserProfile>>,
     pub ai_polish_enabled: Arc<AtomicBool>,
-    pub ai_polish_api_key: Arc<parking_lot::Mutex<String>>,
-    pub assistant_api_key: Arc<parking_lot::Mutex<String>>,
     pub openai_codex_oauth_session: OAuthSessionState<OpenaiCodexOauthSession>,
     pub grok_build_oauth_session: OAuthSessionState<GrokBuildOauthSession>,
     pub online_asr_api_key: Arc<parking_lot::Mutex<String>>,
@@ -558,14 +556,6 @@ impl AppState {
 
     pub fn llm_provider_config(&self) -> LlmProviderConfig {
         self.with_profile(|p| p.llm_provider.clone())
-    }
-
-    pub fn set_ai_polish_api_key(&self, api_key: impl Into<String>) {
-        *self.profile.ai_polish_api_key.lock() = api_key.into();
-    }
-
-    pub fn set_assistant_api_key(&self, api_key: impl Into<String>) {
-        *self.profile.assistant_api_key.lock() = api_key.into();
     }
 
     pub fn read_openai_codex_oauth_session(&self) -> Option<OpenaiCodexOauthSession> {
